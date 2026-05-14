@@ -1,0 +1,88 @@
+{
+  "id": "com.company.sac.decompositiontree",
+  "version": "0.4.1",
+  "name": "Decomposition Tree",
+  "description": "Expandable left-to-right decomposition tree with a synthetic Total root, SAC dimensions as hierarchy levels, one measure as bar value, and Top-N plus Others rollup.",
+  "newInstancePrefix": "DecompositionTree",
+  "icon": "https://barko29.github.io/sac-decomposition-tree-widget/icon.svg",
+  "webcomponents": [
+    {
+      "kind": "main",
+      "tag": "com-company-decomposition-tree",
+      "url": "https://barko29.github.io/sac-decomposition-tree-widget/decomposition-tree.js",
+      "integrity": "",
+      "ignoreIntegrity": true
+    },
+    {
+      "kind": "styling",
+      "tag": "com-company-decomposition-tree-styling",
+      "url": "https://barko29.github.io/sac-decomposition-tree-widget/decomposition-tree.js",
+      "integrity": "",
+      "ignoreIntegrity": true
+    }
+  ],
+  "dataBindings": {
+    "mainBinding": {
+      "feeds": [
+        {
+          "id": "dimensions",
+          "description": "Dimensions / Hierarchy",
+          "type": "dimension"
+        },
+        {
+          "id": "measures",
+          "description": "Measure",
+          "type": "mainStructureMember"
+        }
+      ]
+    }
+  },
+  "properties": {
+    "nodeWidth": { "type": "integer", "default": 250 },
+    "nodeHeight": { "type": "integer", "default": 58 },
+    "levelGap": { "type": "integer", "default": 90 },
+    "siblingGap": { "type": "integer", "default": 16 },
+
+    "barColor": { "type": "string", "default": "#2563eb" },
+    "negativeBarColor": { "type": "string", "default": "#dc2626" },
+    "othersBarColor": { "type": "string", "default": "#64748b" },
+    "barBackgroundColor": { "type": "string", "default": "#e2e8f0" },
+
+    "backgroundColor": { "type": "string", "default": "#f8fafc" },
+
+    "nodeBackgroundColor": { "type": "string", "default": "#ffffff" },
+    "nodeBorderColor": { "type": "string", "default": "#e2e8f0" },
+    "nodeShadowColor": { "type": "string", "default": "#0f172a" },
+    "focusBorderColor": { "type": "string", "default": "#2563eb" },
+
+    "labelColor": { "type": "string", "default": "#0f172a" },
+    "valueLabelColor": { "type": "string", "default": "#475569" },
+    "othersLabelColor": { "type": "string", "default": "#475569" },
+
+    "connectorColor": { "type": "string", "default": "#cbd5e1" },
+
+    "toggleBackgroundColor": { "type": "string", "default": "#f8fafc" },
+    "toggleBorderColor": { "type": "string", "default": "#94a3b8" },
+    "toggleTextColor": { "type": "string", "default": "#334155" },
+
+    "showValues": { "type": "boolean", "default": true },
+    "initialExpandLevel": { "type": "integer", "default": 1 },
+    "maxVisibleNodes": { "type": "integer", "default": 500 },
+    "rootLabel": { "type": "string", "default": "Total" },
+    "topN": { "type": "integer", "default": 10 },
+    "enableOthers": { "type": "boolean", "default": true },
+    "othersLabel": { "type": "string", "default": "Others" },
+    "sortDescending": { "type": "boolean", "default": true }
+  },
+  "methods": {
+    "expandAll": { "description": "Expands all nodes." },
+    "collapseAll": { "description": "Collapses all nodes." },
+    "setExpandedLevel": { "description": "Expands nodes up to the requested zero-based level." },
+    "setData": { "description": "Sets data from script for local testing or advanced use." }
+  },
+  "events": {
+    "onNodeClick": { "description": "Triggered when a node is clicked." },
+    "onNodeExpand": { "description": "Triggered when a node is expanded." },
+    "onNodeCollapse": { "description": "Triggered when a node is collapsed." }
+  }
+}
