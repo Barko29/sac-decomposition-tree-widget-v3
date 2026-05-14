@@ -1,22 +1,22 @@
 {
-  "id": "com.company.sac.decompositiontree",
-  "version": "0.4.1",
-  "name": "Decomposition Tree",
+  "id": "com.company.sac.decompositiontree.v3",
+  "version": "0.7.1",
+  "name": "Decomposition Tree v3",
   "description": "Expandable left-to-right decomposition tree with a synthetic Total root, SAC dimensions as hierarchy levels, one measure as bar value, and Top-N plus Others rollup.",
   "newInstancePrefix": "DecompositionTree",
-  "icon": "https://barko29.github.io/sac-decomposition-tree-widget/icon.svg",
+  "icon": "https://barko29.github.io/sac-decomposition-tree-widget-v3/icon.svg",
   "webcomponents": [
     {
       "kind": "main",
-      "tag": "com-company-decomposition-tree",
-      "url": "https://barko29.github.io/sac-decomposition-tree-widget/decomposition-tree.js",
+      "tag": "com-company-decomposition-tree-v3",
+      "url": "https://barko29.github.io/sac-decomposition-tree-widget-v3/decomposition-tree.js",
       "integrity": "",
       "ignoreIntegrity": true
     },
     {
       "kind": "styling",
-      "tag": "com-company-decomposition-tree-styling",
-      "url": "https://barko29.github.io/sac-decomposition-tree-widget/decomposition-tree.js",
+      "tag": "com-company-decomposition-tree-v3-styling",
+      "url": "https://barko29.github.io/sac-decomposition-tree-widget-v3/decomposition-tree.js",
       "integrity": "",
       "ignoreIntegrity": true
     }
@@ -66,6 +66,9 @@
     "toggleTextColor": { "type": "string", "default": "#334155" },
 
     "showValues": { "type": "boolean", "default": true },
+    "showPercentOfParent": { "type": "boolean", "default": true },
+    "showHoverTooltip": { "type": "boolean", "default": true },
+    "percentDecimals": { "type": "integer", "default": 1 },
     "initialExpandLevel": { "type": "integer", "default": 1 },
     "maxVisibleNodes": { "type": "integer", "default": 500 },
     "rootLabel": { "type": "string", "default": "Total" },
@@ -78,11 +81,16 @@
     "expandAll": { "description": "Expands all nodes." },
     "collapseAll": { "description": "Collapses all nodes." },
     "setExpandedLevel": { "description": "Expands nodes up to the requested zero-based level." },
-    "setData": { "description": "Sets data from script for local testing or advanced use." }
+    "setData": { "description": "Sets data from script for local testing or advanced use." },
+    "selectNode": { "description": "Programmatically select a node by its ID. Fires onNodeSelected." },
+    "clearSelection": { "description": "Clear the current selection. Fires onNodeDeselected if there was one." },
+    "getSelection": { "description": "Returns the current selection payload (nodeId, label, value, filters[], etc.) or null." }
   },
   "events": {
-    "onNodeClick": { "description": "Triggered when a node is clicked." },
+    "onNodeClick": { "description": "Triggered when a node is clicked (legacy, retained for backward compatibility). Same payload as onNodeSelected." },
     "onNodeExpand": { "description": "Triggered when a node is expanded." },
-    "onNodeCollapse": { "description": "Triggered when a node is collapsed." }
+    "onNodeCollapse": { "description": "Triggered when a node is collapsed." },
+    "onNodeSelected": { "description": "Triggered when a node becomes the active selection. event.detail = { nodeId, label, value, level, pctOfParent, pctOfTotal, filters: [{dimension, dimensionName, member}], measure }." },
+    "onNodeDeselected": { "description": "Triggered when the active selection is cleared by user action. event.detail = { nodeId } of the previously selected node." }
   }
 }
