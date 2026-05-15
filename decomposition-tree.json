@@ -1,6 +1,6 @@
 {
   "id": "com.company.sac.decompositiontree.v3",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "name": "Decomposition Tree v3",
   "description": "Expandable left-to-right decomposition tree with synthetic Total root, drill-by-dimension picker, optional two-measure comparison with variance bars, Top-N + Others rollup, story-level selection events, and full theming control.",
   "newInstancePrefix": "DecompositionTree",
@@ -42,6 +42,10 @@
     "nodeHeight": { "type": "integer", "default": 58 },
     "levelGap": { "type": "integer", "default": 90 },
     "siblingGap": { "type": "integer", "default": 16 },
+    "paddingLeft": { "type": "integer", "default": 14 },
+    "paddingRight": { "type": "integer", "default": 14 },
+    "labelTagGap": { "type": "integer", "default": 8 },
+    "showDimensionTag": { "type": "boolean", "default": true },
 
     "barColor": { "type": "string", "default": "#2563eb" },
     "negativeBarColor": { "type": "string", "default": "#dc2626" },
