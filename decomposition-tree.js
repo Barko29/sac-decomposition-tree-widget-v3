@@ -13,6 +13,16 @@
     showPercentOfParent: true,
     showHoverTooltip: true,
     percentDecimals: 1,
+
+    // Two-measure comparison mode (activated when a second measure is bound).
+    higherIsBetter: true,                  // false for cost-style measures
+    showPlanBar: true,
+    showVariance: true,
+    varianceDisplay: "both",               // "percent" | "absolute" | "both"
+    favorableColor: "#16a34a",             // green
+    unfavorableColor: "#dc2626",           // red
+    planBarColor: "#94a3b8",               // neutral grey track
+
     initialExpandLevel: 1,
     maxVisibleNodes: 500,
     rootLabel: "Total",
@@ -113,6 +123,27 @@
       minimumFractionDigits: d,
       maximumFractionDigits: d
     }).format(fraction);
+  }
+
+  function formatSignedNumber(value) {
+    if (!Number.isFinite(value)) return "—";
+    const v = Math.abs(value);
+    const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+    return sign + new Intl.NumberFormat(undefined, {
+      maximumFractionDigits: 1
+    }).format(v);
+  }
+
+  function formatSignedPercent(fraction, decimals) {
+    if (!Number.isFinite(fraction)) return "—";
+    const d = Math.max(0, Math.min(4, Number.isFinite(decimals) ? decimals : 1));
+    const v = Math.abs(fraction);
+    const sign = fraction > 0 ? "+" : fraction < 0 ? "−" : "";
+    return sign + new Intl.NumberFormat(undefined, {
+      style: "percent",
+      minimumFractionDigits: d,
+      maximumFractionDigits: d
+    }).format(v);
   }
 
   function hexToRgba(hex, alpha) {
@@ -326,10 +357,11 @@
   /* ---------- Dimension-aware extraction (drill-by picker) ---------- */
 
   // Returns a richer shape than the old extractor:
-  //   - dimensions: ordered list of { alias, name } for the feed
-  //   - measureAlias: the single bound measure
-  //   - rows: each binding row with a `cells` object keyed by alias
-  //           so we can aggregate dynamically by any dimension subset
+  //   - dimensions:  ordered list of { alias, name } for the feed
+  //   - measureAlias: the primary measure (drives the foreground bar)
+  //   - planAlias:    optional secondary measure (drives the plan/target track)
+  //   - rows:         each binding row with a `cells` object keyed by alias,
+  //                   plus a numeric `value` and `valuePlan`
   function extractBindingDataset(binding) {
     if (!binding || !Array.isArray(binding.data) || !binding.metadata) {
       return null;
@@ -348,6 +380,10 @@
     const measureAlias = measureAliases[0];
     if (!dimensionAliases.length || !measureAlias) return null;
 
+    // The second measure is optional. The widget falls back to single-
+    // measure rendering when planAlias is absent.
+    const planAlias = measureAliases[1] || null;
+
     // Try to find a human-readable name per dimension from metadata.
     const dimensionsMeta = binding.metadata.dimensions || {};
     const dimensions = dimensionAliases.map(alias => {
@@ -357,6 +393,18 @@
         name: String(meta.description || meta.name || alias)
       };
     });
+
+    // Same for measures, used by the hover card and Builder Panel.
+    const measuresMeta = binding.metadata.mainStructureMembers || binding.metadata.measures || {};
+    const measureName =
+      (measuresMeta[measureAlias] &&
+        String(measuresMeta[measureAlias].description || measuresMeta[measureAlias].label || measureAlias)) ||
+      measureAlias;
+    const planName = planAlias
+      ? (measuresMeta[planAlias] &&
+          String(measuresMeta[planAlias].description || measuresMeta[planAlias].label || planAlias)) ||
+        planAlias
+      : null;
 
     const rows = binding.data
       .map(row => {
@@ -369,11 +417,12 @@
           if (label !== "") anyLabel = true;
         });
         const value = readMeasureValue(row[measureAlias]);
-        return anyLabel ? { cells, value } : null;
+        const valuePlan = planAlias ? readMeasureValue(row[planAlias]) : 0;
+        return anyLabel ? { cells, value, valuePlan } : null;
       })
       .filter(r => r !== null);
 
-    return { dimensions, measureAlias, rows };
+    return { dimensions, measureAlias, planAlias, measureName, planName, rows };
   }
 
   // Aggregate dataset rows filtered by an arbitrary set of dimension
@@ -409,10 +458,13 @@
         buckets.set(key, {
           id: cell.id || cell.label,
           label: cell.label,
-          value: 0
+          value: 0,
+          valuePlan: 0
         });
       }
-      buckets.get(key).value += toNumber(row.value);
+      const bucket = buckets.get(key);
+      bucket.value += toNumber(row.value);
+      bucket.valuePlan += toNumber(row.valuePlan);
     }
 
     let children = Array.from(buckets.values());
@@ -427,14 +479,14 @@
       const visible = children.slice(0, topN);
       const hidden = children.slice(topN);
       const othersValue = hidden.reduce((s, c) => s + toNumber(c.value), 0);
+      const othersPlan  = hidden.reduce((s, c) => s + toNumber(c.valuePlan), 0);
       visible.push({
         id: "__others__",
         label: settings.othersLabel || "Others",
         value: othersValue,
+        valuePlan: othersPlan,
         isOthers: true,
         hiddenChildrenCount: hidden.length,
-        // Store the labels rolled into Others so we can EXCLUDE them
-        // when drilling further (clicking Others is a no-op for now).
         hiddenLabels: hidden.map(c => c.label)
       });
       children = visible;
@@ -458,6 +510,23 @@
         }
       }
       if (ok) total += toNumber(row.value);
+    }
+    return total;
+  }
+
+  function sumFilteredValuePlan(dataset, filters) {
+    if (!dataset || !dataset.planAlias) return 0;
+    let total = 0;
+    for (const row of dataset.rows) {
+      let ok = true;
+      for (const f of filters) {
+        const cell = row.cells[f.alias];
+        if (!cell || cell.label !== f.label) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) total += toNumber(row.valuePlan);
     }
     return total;
   }
@@ -687,13 +756,23 @@
 
     _buildLazyRoot() {
       const s = this._settings;
+      const hasPlan = !!(this._dataset && this._dataset.planAlias);
       const totalValue = sumFilteredValue(this._dataset, []);
+      const totalPlan = hasPlan ? sumFilteredValuePlan(this._dataset, []) : 0;
       return {
         id: "__root__",
         label: s.rootLabel || "Total",
         level: 0,
         value: totalValue,
+        valuePlan: hasPlan ? totalPlan : null,
+        _variance: hasPlan ? totalValue - totalPlan : null,
+        _variancePct: hasPlan && totalPlan !== 0
+          ? (totalValue - totalPlan) / Math.abs(totalPlan)
+          : null,
         _siblingMax: Math.abs(totalValue),
+        _siblingMaxCombined: hasPlan
+          ? Math.max(Math.abs(totalValue), Math.abs(totalPlan))
+          : Math.abs(totalValue),
         _pctOfParent: 1,                  // root is 100% of itself
         _pctOfTotal: 1,
         _rank: 1,
@@ -734,8 +813,20 @@
         this._settings
       );
 
+      const hasPlan = !!(this._dataset && this._dataset.planAlias);
+
       const siblingMax = buckets.length
         ? Math.max(...buckets.map(b => Math.abs(toNumber(b.value))))
+        : 0;
+      // For overlay rendering, both bars must share the same denominator
+      // so they're visually comparable within the sibling group.
+      const siblingMaxCombined = buckets.length
+        ? (hasPlan
+            ? Math.max(...buckets.map(b => Math.max(
+                Math.abs(toNumber(b.value)),
+                Math.abs(toNumber(b.valuePlan))
+              )))
+            : siblingMax)
         : 0;
 
       const parentValue = toNumber(node.value);
@@ -744,6 +835,7 @@
 
       node.children = buckets.map((b, idx) => {
         const v = toNumber(b.value);
+        const p = toNumber(b.valuePlan);
         return {
           id: this._idForPath([
             ...node.filterPath,
@@ -752,7 +844,11 @@
           label: b.label,
           level: childLevel,
           value: b.value,
+          valuePlan: hasPlan ? b.valuePlan : null,
+          _variance: hasPlan ? (v - p) : null,
+          _variancePct: hasPlan && p !== 0 ? (v - p) / Math.abs(p) : null,
           _siblingMax: siblingMax,
+          _siblingMaxCombined: siblingMaxCombined,
           _pctOfParent: parentValue !== 0 ? v / parentValue : 0,
           _pctOfTotal:  totalValue  !== 0 ? v / totalValue  : 0,
           _rank: idx + 1,
@@ -1041,6 +1137,7 @@
           member: f.label
         };
       });
+      const hasPlan = !!(this._dataset && this._dataset.planAlias);
       return {
         nodeId: node.id,
         label: node.label,
@@ -1049,7 +1146,12 @@
         pctOfParent: node._pctOfParent,
         pctOfTotal: node._pctOfTotal,
         filters,
-        measure: this._dataset ? this._dataset.measureAlias : null
+        measure: this._dataset ? this._dataset.measureAlias : null,
+        // Comparison-mode fields (null when no second measure is bound):
+        planMeasure: hasPlan ? this._dataset.planAlias : null,
+        valuePlan:   hasPlan ? toNumber(node.valuePlan) : null,
+        variance:    hasPlan ? toNumber(node._variance) : null,
+        variancePct: hasPlan ? node._variancePct : null
       };
     }
 
@@ -1205,6 +1307,22 @@
       return node.label;
     }
 
+    // Compact variance text for the node card: respects the
+    // varianceDisplay setting (percent / absolute / both).
+    _formatVarianceShort(absVar, pctVar) {
+      const s = this._settings;
+      const mode = s.varianceDisplay || "both";
+      const pctStr = Number.isFinite(pctVar)
+        ? formatSignedPercent(pctVar, s.percentDecimals)
+        : null;
+      const absStr = formatSignedNumber(absVar);
+
+      if (mode === "percent") return pctStr || absStr;
+      if (mode === "absolute") return absStr;
+      // "both" — prefer percent when defined, else fall back to absolute
+      return pctStr ? `${pctStr} (${absStr})` : absStr;
+    }
+
     /* ---------- Render ---------- */
 
     render() {
@@ -1274,13 +1392,40 @@
       const selectionPathIds = this._computeSelectionPathIds(positioned, byIndex);
       const hasSelection = !!this._selectedNodeId && selectionPathIds.size > 0;
 
+      const hasPlan = !!(this._dataset && this._dataset.planAlias);
+      const inComparisonMode = hasPlan && s.showPlanBar !== false;
+
       const nodes = positioned
         .map(node => {
           const barX = node.x + 14;
           const barY = node.y + 31;
           const barWidthMax = node.width - 28;
-          const denom = Math.max(1, Math.abs(node._siblingMax ?? node.value ?? 1));
+
+          // In comparison mode the actual and plan bars share a denominator
+          // (the per-sibling-group max across both measures). Falls back
+          // gracefully when valuePlan / _siblingMaxCombined are missing.
+          const denom = inComparisonMode
+            ? Math.max(1, Math.abs(node._siblingMaxCombined ?? node._siblingMax ?? node.value ?? 1))
+            : Math.max(1, Math.abs(node._siblingMax ?? node.value ?? 1));
+
           const barWidth = Math.max(0, (Math.abs(node.value) / denom) * barWidthMax);
+          const planWidth = inComparisonMode
+            ? Math.max(0, (Math.abs(toNumber(node.valuePlan)) / denom) * barWidthMax)
+            : 0;
+
+          // Variance "favorability": higherIsBetter flips the sign meaning.
+          // Variance is value - plan; favorable when positive AND higher-is-better,
+          // OR when negative AND lower-is-better.
+          const variance = inComparisonMode ? toNumber(node._variance) : 0;
+          const variancePct = inComparisonMode ? node._variancePct : null;
+          const hasMeaningfulVariance =
+            inComparisonMode &&
+            node.level > 0 &&
+            (variance !== 0 || (Number.isFinite(variancePct) && variancePct !== 0));
+          const isFavorable = s.higherIsBetter !== false ? variance >= 0 : variance <= 0;
+          const varianceColor = hasMeaningfulVariance
+            ? (isFavorable ? s.favorableColor : s.unfavorableColor)
+            : s.valueLabelColor;
 
           const isSelected = node.id === this._selectedNodeId;
           const isOnPath = selectionPathIds.has(node.id);
@@ -1348,6 +1493,11 @@
               }
 
               <rect class="bar-bg" x="${barX}" y="${barY}" width="${barWidthMax}" height="9" rx="4.5"></rect>
+              ${
+                inComparisonMode
+                  ? `<rect class="bar-plan" x="${barX}" y="${barY}" width="${planWidth}" height="9" rx="4.5" fill="${s.planBarColor}"></rect>`
+                  : ""
+              }
               <rect class="bar-value" x="${barX}" y="${barY}" width="${barWidth}" height="9" rx="4.5" fill="${fill}"></rect>
 
               ${
@@ -1357,11 +1507,17 @@
               }
 
               ${
-                s.showPercentOfParent !== false &&
-                node.level > 0 &&
-                Number.isFinite(node._pctOfParent)
-                  ? `<text class="pct-label" x="${node.x + node.width - 14}" y="${node.y + 52}" text-anchor="end">${escapeXml(formatPercent(node._pctOfParent, s.percentDecimals))}</text>`
-                  : ""
+                /* Right-side small label: in comparison mode, the variance
+                   replaces % of parent (variance is the more useful number
+                   when comparing two measures). The hover card always shows
+                   both. */
+                inComparisonMode && s.showVariance !== false && hasMeaningfulVariance
+                  ? `<text class="var-label" x="${node.x + node.width - 14}" y="${node.y + 52}" text-anchor="end" fill="${varianceColor}">${escapeXml(this._formatVarianceShort(variance, variancePct))}</text>`
+                  : (s.showPercentOfParent !== false &&
+                     node.level > 0 &&
+                     Number.isFinite(node._pctOfParent)
+                      ? `<text class="pct-label" x="${node.x + node.width - 14}" y="${node.y + 52}" text-anchor="end">${escapeXml(formatPercent(node._pctOfParent, s.percentDecimals))}</text>`
+                      : "")
               }
 
               ${
@@ -1463,12 +1619,50 @@
         ? `<div class="hc-dim">${escapeXml(dimName)}</div>`
         : "";
 
+      const hasPlan = !!(this._dataset && this._dataset.planAlias);
+      const inComparisonMode = hasPlan && s.showPlanBar !== false;
+      const measureName = this._dataset ? (this._dataset.measureName || "Value") : "Value";
+      const planName = this._dataset && this._dataset.planName ? this._dataset.planName : "Plan";
+
       const valueRow = `
         <div class="hc-row hc-row-main">
-          <span class="hc-row-label">Value</span>
+          <span class="hc-row-label">${escapeXml(measureName)}</span>
           <span class="hc-row-value">${formatNumber(node.value)}</span>
         </div>
       `;
+
+      // Comparison-mode rows: plan value + signed variance.
+      let comparisonRows = "";
+      if (inComparisonMode && node.level >= 0) {
+        const planVal = toNumber(node.valuePlan);
+        const variance = toNumber(node._variance);
+        const variancePct = node._variancePct;
+        const isFavorable = s.higherIsBetter !== false ? variance >= 0 : variance <= 0;
+        const varColor = variance === 0
+          ? s.valueLabelColor
+          : (isFavorable ? s.favorableColor : s.unfavorableColor);
+
+        comparisonRows = `
+          <div class="hc-row">
+            <span class="hc-row-label">${escapeXml(planName)}</span>
+            <span class="hc-row-value">${formatNumber(planVal)}</span>
+          </div>
+          <div class="hc-row">
+            <span class="hc-row-label">Variance</span>
+            <span class="hc-row-value" style="color:${varColor}">${escapeXml(formatSignedNumber(variance))}</span>
+          </div>
+          ${
+            Number.isFinite(variancePct)
+              ? `
+                <div class="hc-row">
+                  <span class="hc-row-label">Variance %</span>
+                  <span class="hc-row-value" style="color:${varColor}">${escapeXml(formatSignedPercent(variancePct, s.percentDecimals))}</span>
+                </div>
+              `
+              : ""
+          }
+        `;
+      }
 
       const pctParentRow =
         node.level > 0 && Number.isFinite(node._pctOfParent)
@@ -1516,6 +1710,7 @@
           ${dimRow}
           <div class="hc-title">${escapeXml(this.getNodeDisplayLabel(node))}</div>
           ${valueRow}
+          ${comparisonRows}
           ${pctParentRow}
           ${pctTotalRow}
           ${rankRow}
@@ -1843,7 +2038,13 @@
             pointer-events: none;
           }
           .bar-bg { fill: ${s.barBackgroundColor}; pointer-events: none; }
+          .bar-plan { pointer-events: none; opacity: 0.55; }
           .bar-value { pointer-events: none; }
+          .var-label {
+            font-size: 11px;
+            font-weight: 700;
+            pointer-events: none;
+          }
           .connector {
             stroke: ${s.connectorColor};
             stroke-width: 1.3;
@@ -2072,6 +2273,19 @@
     { prop: "othersBarColor",        label: "Bar color (Others)",       type: "color"  },
     { prop: "barBackgroundColor",    label: "Bar track (empty) color",  type: "color"  },
 
+    { section: "Comparison mode (when 2nd measure is bound)" },
+    { prop: "showPlanBar",           label: "Show plan/target overlay", type: "boolean" },
+    { prop: "showVariance",          label: "Show variance on nodes",   type: "boolean" },
+    { prop: "varianceDisplay",       label: "Variance shows",           type: "select", options: [
+      { value: "both",     label: "Percent + absolute" },
+      { value: "percent",  label: "Percent only" },
+      { value: "absolute", label: "Absolute only" }
+    ]},
+    { prop: "higherIsBetter",        label: "Higher value is better",   type: "boolean" },
+    { prop: "favorableColor",        label: "Favorable variance color", type: "color"  },
+    { prop: "unfavorableColor",      label: "Unfavorable variance color",type: "color" },
+    { prop: "planBarColor",          label: "Plan/target bar color",    type: "color"  },
+
     { section: "Background" },
     { prop: "backgroundColor",       label: "Widget background",        type: "color"  },
 
@@ -2232,6 +2446,23 @@
             `;
           }
 
+          if (field.type === "select") {
+            const options = (field.options || [])
+              .map(opt => {
+                const selected = String(current) === String(opt.value) ? "selected" : "";
+                return `<option value="${escapeXml(opt.value)}" ${selected}>${escapeXml(opt.label)}</option>`;
+              })
+              .join("");
+            return `
+              <label class="row">
+                <span class="label">${labelHtml}</span>
+                <select data-prop="${safeProp}">
+                  ${options}
+                </select>
+              </label>
+            `;
+          }
+
           // text
           const val = escapeXml(current ?? "");
           return `
@@ -2315,6 +2546,22 @@
             cursor: pointer;
             accent-color: #0a6ed1;
           }
+          .row select {
+            flex: 0 0 160px;
+            padding: 4px 6px;
+            border: 1px solid #bfc8d4;
+            border-radius: 4px;
+            font: inherit;
+            color: inherit;
+            background: #ffffff;
+            cursor: pointer;
+            box-sizing: border-box;
+          }
+          .row select:focus {
+            outline: none;
+            border-color: #0a6ed1;
+            box-shadow: 0 0 0 1px #0a6ed1;
+          }
         </style>
         ${rowsHtml}
       `;
@@ -2325,7 +2572,7 @@
 
     wireEvents() {
       this.shadowRoot
-        .querySelectorAll("input[data-prop]")
+        .querySelectorAll("[data-prop]")
         .forEach(input => {
           const prop = input.getAttribute("data-prop");
           const field = STYLING_FIELDS.find(f => f.prop === prop);
@@ -2343,6 +2590,10 @@
           } else if (field.type === "color") {
             input.addEventListener("change", () => {
               this.emitChange(prop, String(input.value || ""));
+            });
+          } else if (field.type === "select") {
+            input.addEventListener("change", () => {
+              this.emitChange(prop, String(input.value ?? ""));
             });
           } else {
             input.addEventListener("change", () => {
