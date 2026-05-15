@@ -221,14 +221,12 @@
       children = [...visibleChildren, othersNode];
     }
 
-    // Per-parent bar normalization: every child gets stamped with the
-    // largest absolute sibling value, so bar widths compare within the
-    // sibling group instead of against the global root total.
+    // Share-of-parent normalization: a child's bar is sized by its
+    // share of the parent's value, so bar width and "% of parent"
+    // label always agree.
     if (children.length) {
-      const siblingMax = Math.max(
-        ...children.map(c => Math.abs(toNumber(c.value)))
-      );
       const parentValue = toNumber(node.value);
+      const siblingMax = Math.abs(parentValue);
       children.forEach((c, idx) => {
         c._siblingMax = siblingMax;
         c._pctOfParent = parentValue !== 0 ? toNumber(c.value) / parentValue : 0;
@@ -769,6 +767,9 @@
         _variancePct: hasPlan && totalPlan !== 0
           ? (totalValue - totalPlan) / Math.abs(totalPlan)
           : null,
+        // Share-of-parent normalization: a node's bar uses its parent's
+        // value (or max of parent value/plan in comparison mode) as
+        // denominator. Root has no parent — normalize against itself.
         _siblingMax: Math.abs(totalValue),
         _siblingMaxCombined: hasPlan
           ? Math.max(Math.abs(totalValue), Math.abs(totalPlan))
@@ -814,33 +815,19 @@
       );
 
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
-      const isLevel1 = node.level === 0;
 
-      // Per-parent bar normalization with one exception: level-1 nodes
-      // normalize against the ROOT's value, so their bars correctly show
-      // share-of-total. Deeper levels keep per-parent normalization so
-      // small siblings remain visible at depth.
-      const siblingMax = isLevel1
-        ? Math.abs(toNumber(node.value))
-        : (buckets.length
-            ? Math.max(...buckets.map(b => Math.abs(toNumber(b.value))))
-            : 0);
-      // Comparison-mode denominator: same hybrid rule but also accounts
-      // for the plan track so both bars stay visually comparable.
-      const siblingMaxCombined = isLevel1
-        ? (hasPlan
-            ? Math.max(Math.abs(toNumber(node.value)), Math.abs(toNumber(node.valuePlan)))
-            : Math.abs(toNumber(node.value)))
-        : (buckets.length
-            ? (hasPlan
-                ? Math.max(...buckets.map(b => Math.max(
-                    Math.abs(toNumber(b.value)),
-                    Math.abs(toNumber(b.valuePlan))
-                  )))
-                : siblingMax)
-            : 0);
-
+      // Share-of-parent normalization at every level: a child's bar is
+      // sized by its share of the parent's value. The parent's bar drives
+      // the denominator, so bar width and "% of parent" label always match.
       const parentValue = toNumber(node.value);
+      const parentValuePlan = hasPlan ? toNumber(node.valuePlan) : 0;
+      const siblingMax = Math.abs(parentValue);
+      // Comparison-mode denominator: use parent's max(actual, plan) so the
+      // overlay plan bar is on the same scale as the actual bar.
+      const siblingMaxCombined = hasPlan
+        ? Math.max(Math.abs(parentValue), Math.abs(parentValuePlan))
+        : siblingMax;
+
       const totalValue =
         this._lazyTree ? toNumber(this._lazyTree.value) : 0;
 
