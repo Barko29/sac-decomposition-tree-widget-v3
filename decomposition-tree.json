@@ -1,8 +1,8 @@
 {
   "id": "com.company.sac.decompositiontree.v3",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "name": "Decomposition Tree v3",
-  "description": "Expandable left-to-right decomposition tree with a synthetic Total root, SAC dimensions as hierarchy levels, one measure as bar value, and Top-N plus Others rollup.",
+  "description": "Expandable left-to-right decomposition tree with synthetic Total root, drill-by-dimension picker, optional two-measure comparison with variance bars, Top-N + Others rollup, story-level selection events, and full theming control.",
   "newInstancePrefix": "DecompositionTree",
   "icon": "https://barko29.github.io/sac-decomposition-tree-widget-v3/icon.svg",
   "webcomponents": [
@@ -31,7 +31,7 @@
         },
         {
           "id": "measures",
-          "description": "Measure",
+          "description": "Measure (bind 1 for standard mode; bind 2 to enable comparison mode — second measure becomes plan/target)",
           "type": "mainStructureMember"
         }
       ]
@@ -69,6 +69,14 @@
     "showPercentOfParent": { "type": "boolean", "default": true },
     "showHoverTooltip": { "type": "boolean", "default": true },
     "percentDecimals": { "type": "integer", "default": 1 },
+
+    "showPlanBar": { "type": "boolean", "default": true },
+    "showVariance": { "type": "boolean", "default": true },
+    "varianceDisplay": { "type": "string", "default": "both" },
+    "higherIsBetter": { "type": "boolean", "default": true },
+    "favorableColor": { "type": "string", "default": "#16a34a" },
+    "unfavorableColor": { "type": "string", "default": "#dc2626" },
+    "planBarColor": { "type": "string", "default": "#94a3b8" },
     "initialExpandLevel": { "type": "integer", "default": 1 },
     "maxVisibleNodes": { "type": "integer", "default": 500 },
     "rootLabel": { "type": "string", "default": "Total" },
