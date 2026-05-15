@@ -814,20 +814,31 @@
       );
 
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
+      const isLevel1 = node.level === 0;
 
-      const siblingMax = buckets.length
-        ? Math.max(...buckets.map(b => Math.abs(toNumber(b.value))))
-        : 0;
-      // For overlay rendering, both bars must share the same denominator
-      // so they're visually comparable within the sibling group.
-      const siblingMaxCombined = buckets.length
+      // Per-parent bar normalization with one exception: level-1 nodes
+      // normalize against the ROOT's value, so their bars correctly show
+      // share-of-total. Deeper levels keep per-parent normalization so
+      // small siblings remain visible at depth.
+      const siblingMax = isLevel1
+        ? Math.abs(toNumber(node.value))
+        : (buckets.length
+            ? Math.max(...buckets.map(b => Math.abs(toNumber(b.value))))
+            : 0);
+      // Comparison-mode denominator: same hybrid rule but also accounts
+      // for the plan track so both bars stay visually comparable.
+      const siblingMaxCombined = isLevel1
         ? (hasPlan
-            ? Math.max(...buckets.map(b => Math.max(
-                Math.abs(toNumber(b.value)),
-                Math.abs(toNumber(b.valuePlan))
-              )))
-            : siblingMax)
-        : 0;
+            ? Math.max(Math.abs(toNumber(node.value)), Math.abs(toNumber(node.valuePlan)))
+            : Math.abs(toNumber(node.value)))
+        : (buckets.length
+            ? (hasPlan
+                ? Math.max(...buckets.map(b => Math.max(
+                    Math.abs(toNumber(b.value)),
+                    Math.abs(toNumber(b.valuePlan))
+                  )))
+                : siblingMax)
+            : 0);
 
       const parentValue = toNumber(node.value);
       const totalValue =
