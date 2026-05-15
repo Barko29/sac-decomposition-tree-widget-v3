@@ -6,6 +6,10 @@
     nodeHeight: 58,
     levelGap: 90,
     siblingGap: 16,
+    paddingLeft: 14,
+    paddingRight: 14,
+    labelTagGap: 8,
+    showDimensionTag: true,
     barColor: "#2563eb",
     negativeBarColor: "#dc2626",
     othersBarColor: "#64748b",
@@ -1393,11 +1397,15 @@
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
       const inComparisonMode = hasPlan && s.showPlanBar !== false;
 
+      const padL = Math.max(0, toNumber(s.paddingLeft) || 14);
+      const padR = Math.max(0, toNumber(s.paddingRight) || 14);
+      const tagGap = Math.max(0, toNumber(s.labelTagGap) || 8);
+
       const nodes = positioned
         .map(node => {
-          const barX = node.x + 14;
+          const barX = node.x + padL;
           const barY = node.y + 31;
-          const barWidthMax = node.width - 28;
+          const barWidthMax = Math.max(0, node.width - padL - padR);
 
           // In comparison mode the actual and plan bars share a denominator
           // (the per-sibling-group max across both measures). Falls back
@@ -1452,6 +1460,21 @@
             this._availableDimsForLevel(node.level + 1).length > 1;
 
           const dimLabel = inLazyMode ? this._dimensionDisplayForNode(node) : "";
+          const showDimTag = s.showDimensionTag !== false && !!dimLabel;
+
+          // Reserve space for the dim tag so the node label doesn't overlap.
+          // SVG text width is hard to know without a DOM measure pass; we
+          // estimate ~6.5px per char at 9px font size and cap at half-card.
+          const dimTagEstWidth = showDimTag
+            ? Math.min(node.width / 2, Math.max(20, dimLabel.length * 6.5))
+            : 0;
+          const togglePad = hasChildren ? 16 : 0;
+          const labelStartX = node.x + padL + togglePad;
+          const labelMaxRight = node.x + node.width - padR -
+            (showDimTag ? dimTagEstWidth + tagGap : 0);
+          const labelMaxWidth = Math.max(20, labelMaxRight - labelStartX);
+          // Unique clip id per node so each label clips to its own width.
+          const labelClipId = `dt-clip-${node.visibleIndex}`;
 
           return `
             <g
@@ -1475,18 +1498,23 @@
                 hasChildren
                   ? `
                     <g class="toggle" data-action="toggle" data-node-id="${escapeXml(node.id)}">
-                      <circle cx="${node.x + 14}" cy="${node.y + 19}" r="9"></circle>
-                      <text x="${node.x + 14}" y="${node.y + 23}" text-anchor="middle">${expanded ? "−" : "+"}</text>
+                      <circle cx="${node.x + padL}" cy="${node.y + 19}" r="9"></circle>
+                      <text x="${node.x + padL}" y="${node.y + 23}" text-anchor="middle">${expanded ? "−" : "+"}</text>
                     </g>
                   `
                   : ""
               }
 
-              <text class="node-label" x="${node.x + (hasChildren ? 30 : 14)}" y="${node.y + 23}">${escapeXml(displayLabel)}</text>
+              <defs>
+                <clipPath id="${labelClipId}">
+                  <rect x="${labelStartX}" y="${node.y}" width="${labelMaxWidth}" height="${node.height}"></rect>
+                </clipPath>
+              </defs>
+              <text class="node-label" clip-path="url(#${labelClipId})" x="${labelStartX}" y="${node.y + 23}">${escapeXml(displayLabel)}</text>
 
               ${
-                dimLabel
-                  ? `<text class="dim-tag" x="${node.x + node.width - 14}" y="${node.y + 14}" text-anchor="end">${escapeXml(dimLabel)}</text>`
+                showDimTag
+                  ? `<text class="dim-tag" x="${node.x + node.width - padR}" y="${node.y + 14}" text-anchor="end">${escapeXml(dimLabel)}</text>`
                   : ""
               }
 
@@ -1510,11 +1538,11 @@
                    when comparing two measures). The hover card always shows
                    both. */
                 inComparisonMode && s.showVariance !== false && hasMeaningfulVariance
-                  ? `<text class="var-label" x="${node.x + node.width - 14}" y="${node.y + 52}" text-anchor="end" fill="${varianceColor}">${escapeXml(this._formatVarianceShort(variance, variancePct))}</text>`
+                  ? `<text class="var-label" x="${node.x + node.width - padR}" y="${node.y + 52}" text-anchor="end" fill="${varianceColor}">${escapeXml(this._formatVarianceShort(variance, variancePct))}</text>`
                   : (s.showPercentOfParent !== false &&
                      node.level > 0 &&
                      Number.isFinite(node._pctOfParent)
-                      ? `<text class="pct-label" x="${node.x + node.width - 14}" y="${node.y + 52}" text-anchor="end">${escapeXml(formatPercent(node._pctOfParent, s.percentDecimals))}</text>`
+                      ? `<text class="pct-label" x="${node.x + node.width - padR}" y="${node.y + 52}" text-anchor="end">${escapeXml(formatPercent(node._pctOfParent, s.percentDecimals))}</text>`
                       : "")
               }
 
@@ -2264,6 +2292,10 @@
     { prop: "nodeHeight",            label: "Node height (px)",         type: "number",  min: 30,  max: 200 },
     { prop: "levelGap",              label: "Gap between levels (px)",  type: "number",  min: 0,   max: 400 },
     { prop: "siblingGap",            label: "Gap between siblings (px)",type: "number",  min: 0,   max: 200 },
+    { prop: "paddingLeft",           label: "Card left padding (px)",   type: "number",  min: 0,   max: 80 },
+    { prop: "paddingRight",          label: "Card right padding (px)",  type: "number",  min: 0,   max: 80 },
+    { prop: "labelTagGap",           label: "Gap: label ↔ dim tag (px)",type: "number",  min: 0,   max: 80 },
+    { prop: "showDimensionTag",      label: "Show dimension tag",       type: "boolean" },
 
     { section: "Bars" },
     { prop: "barColor",              label: "Bar color (positive)",     type: "color"  },
