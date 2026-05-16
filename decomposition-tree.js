@@ -1158,12 +1158,55 @@
         return this._levelDimensions.get(level);
       }
       // Default: first not-yet-used dimension in feed order.
-      const used = new Set(this._levelDimensions.values());
+      // Only count dimensions at levels that are actually reachable
+      // (i.e. their parent level is currently expanded). Stale sticky
+      // choices at collapsed levels must not block drill-by.
+      const used = this._activeLevelDimensions(level);
       const dims = this._dataset ? this._dataset.dimensions : [];
       for (const d of dims) {
         if (!used.has(d.alias)) return d.alias;
       }
       return null;
+    }
+
+    // Returns the set of dimension aliases that are "actively in use"
+    // at levels other than `excludeLevel`. A level is active if either
+    // (a) some node at that level's parent is currently expanded, or
+    // (b) the level is an ancestor of `excludeLevel` (the path the
+    //     user is trying to drill into).
+    _activeLevelDimensions(excludeLevel) {
+      const active = new Set();
+      for (const [lvl, alias] of this._levelDimensions) {
+        if (lvl === excludeLevel) continue;
+        // A level is "active" if some node at level (lvl - 1) is expanded,
+        // meaning its children at `lvl` are visible. Also always keep
+        // ancestor levels (< excludeLevel) since they define the path.
+        if (lvl < excludeLevel || this._isLevelInUse(lvl)) {
+          active.add(alias);
+        }
+      }
+      return active;
+    }
+
+    // Check whether any node at (level - 1) is currently expanded,
+    // meaning children at `level` are actually visible in the tree.
+    _isLevelInUse(level) {
+      if (level <= 1) return this._expanded.has("__root__");
+      // Walk the lazy tree to find any expanded node at (level - 1).
+      if (!this._lazyTree) return false;
+      let found = false;
+      const visit = node => {
+        if (found) return;
+        if (node.level === level - 1 && this._expanded.has(node.id)) {
+          found = true;
+          return;
+        }
+        if (node.children && this._expanded.has(node.id)) {
+          node.children.forEach(visit);
+        }
+      };
+      visit(this._lazyTree);
+      return found;
     }
 
     // Stable, deterministic node id from filter path. Order matters.
@@ -1466,10 +1509,7 @@
 
     _availableDimsForLevel(level) {
       if (!this._dataset) return [];
-      const used = new Set();
-      for (const [lvl, alias] of this._levelDimensions) {
-        if (lvl !== level) used.add(alias);
-      }
+      const used = this._activeLevelDimensions(level);
       return this._dataset.dimensions.filter(d => !used.has(d.alias));
     }
 
