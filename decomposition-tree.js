@@ -35,6 +35,13 @@
     othersLabel: "Others",
     sortDescending: true,
 
+    // Theme & density presets
+    themePreset: "light",                   // "custom" | "light" | "dark" | "horizon" | "highContrast" | "printFriendly"
+    densityMode: "comfortable",             // "compact" | "comfortable" | "spacious"
+
+    // Conditional formatting rules (array of rule objects, stored as JSON string in SAC)
+    conditionalFormattingRules: "[]",
+
     // Cosmetic colors
     backgroundColor: "#f8fafc",
     nodeBackgroundColor: "#ffffff",
@@ -50,6 +57,234 @@
     toggleBorderColor: "#94a3b8",
     toggleTextColor: "#334155"
   };
+
+  /* ---------- Theme presets ---------- */
+
+  const THEME_PRESETS = {
+    custom: { label: "Custom" },           // no overrides — user's manual choices
+    light: {
+      label: "Light",
+      values: {
+        backgroundColor: "#f8fafc",
+        nodeBackgroundColor: "#ffffff",
+        nodeBorderColor: "#e2e8f0",
+        nodeShadowColor: "#0f172a",
+        focusBorderColor: "#2563eb",
+        labelColor: "#0f172a",
+        valueLabelColor: "#475569",
+        othersLabelColor: "#475569",
+        barColor: "#2563eb",
+        negativeBarColor: "#dc2626",
+        othersBarColor: "#64748b",
+        barBackgroundColor: "#e2e8f0",
+        connectorColor: "#cbd5e1",
+        toggleBackgroundColor: "#f8fafc",
+        toggleBorderColor: "#94a3b8",
+        toggleTextColor: "#334155",
+        favorableColor: "#16a34a",
+        unfavorableColor: "#dc2626",
+        planBarColor: "#94a3b8"
+      }
+    },
+    dark: {
+      label: "Dark",
+      values: {
+        backgroundColor: "#0f172a",
+        nodeBackgroundColor: "#1e293b",
+        nodeBorderColor: "#334155",
+        nodeShadowColor: "#000000",
+        focusBorderColor: "#60a5fa",
+        labelColor: "#f1f5f9",
+        valueLabelColor: "#94a3b8",
+        othersLabelColor: "#94a3b8",
+        barColor: "#3b82f6",
+        negativeBarColor: "#f87171",
+        othersBarColor: "#64748b",
+        barBackgroundColor: "#334155",
+        connectorColor: "#475569",
+        toggleBackgroundColor: "#1e293b",
+        toggleBorderColor: "#475569",
+        toggleTextColor: "#cbd5e1",
+        favorableColor: "#4ade80",
+        unfavorableColor: "#f87171",
+        planBarColor: "#64748b"
+      }
+    },
+    horizon: {
+      label: "SAP Horizon",
+      values: {
+        backgroundColor: "#f5f6f7",
+        nodeBackgroundColor: "#ffffff",
+        nodeBorderColor: "#d9d9d9",
+        nodeShadowColor: "#223548",
+        focusBorderColor: "#0070f2",
+        labelColor: "#223548",
+        valueLabelColor: "#556b82",
+        othersLabelColor: "#556b82",
+        barColor: "#0070f2",
+        negativeBarColor: "#cc1919",
+        othersBarColor: "#758ca4",
+        barBackgroundColor: "#e5e5e5",
+        connectorColor: "#bcc3ca",
+        toggleBackgroundColor: "#f5f6f7",
+        toggleBorderColor: "#bcc3ca",
+        toggleTextColor: "#223548",
+        favorableColor: "#188918",
+        unfavorableColor: "#cc1919",
+        planBarColor: "#758ca4"
+      }
+    },
+    highContrast: {
+      label: "High Contrast",
+      values: {
+        backgroundColor: "#000000",
+        nodeBackgroundColor: "#1a1a1a",
+        nodeBorderColor: "#ffffff",
+        nodeShadowColor: "#000000",
+        focusBorderColor: "#ffff00",
+        labelColor: "#ffffff",
+        valueLabelColor: "#cccccc",
+        othersLabelColor: "#cccccc",
+        barColor: "#00bfff",
+        negativeBarColor: "#ff4444",
+        othersBarColor: "#aaaaaa",
+        barBackgroundColor: "#333333",
+        connectorColor: "#666666",
+        toggleBackgroundColor: "#1a1a1a",
+        toggleBorderColor: "#ffffff",
+        toggleTextColor: "#ffffff",
+        favorableColor: "#00ff00",
+        unfavorableColor: "#ff4444",
+        planBarColor: "#999999"
+      }
+    },
+    printFriendly: {
+      label: "Print-friendly",
+      values: {
+        backgroundColor: "#ffffff",
+        nodeBackgroundColor: "#ffffff",
+        nodeBorderColor: "#999999",
+        nodeShadowColor: "#666666",
+        focusBorderColor: "#333333",
+        labelColor: "#000000",
+        valueLabelColor: "#333333",
+        othersLabelColor: "#333333",
+        barColor: "#333333",
+        negativeBarColor: "#999999",
+        othersBarColor: "#bbbbbb",
+        barBackgroundColor: "#e0e0e0",
+        connectorColor: "#999999",
+        toggleBackgroundColor: "#ffffff",
+        toggleBorderColor: "#999999",
+        toggleTextColor: "#333333",
+        favorableColor: "#006600",
+        unfavorableColor: "#cc0000",
+        planBarColor: "#999999"
+      }
+    }
+  };
+
+  /* ---------- Density modes ---------- */
+
+  const DENSITY_MODES = {
+    compact: {
+      label: "Compact",
+      values: { nodeWidth: 200, nodeHeight: 44, levelGap: 60, siblingGap: 10 }
+    },
+    comfortable: {
+      label: "Comfortable",
+      values: { nodeWidth: 250, nodeHeight: 58, levelGap: 90, siblingGap: 16 }
+    },
+    spacious: {
+      label: "Spacious",
+      values: { nodeWidth: 320, nodeHeight: 72, levelGap: 120, siblingGap: 24 }
+    }
+  };
+
+  /* ---------- Conditional formatting engine ---------- */
+
+  // Each rule: { field, operator, value, action, actionValue }
+  //   field:      "value" | "variance" | "variancePct" | "pctOfParent" | "pctOfTotal" | "rank"
+  //   operator:   "<" | "<=" | ">" | ">=" | "==" | "!="
+  //   value:      number (user enters -0.1 for −10%, rank 3, etc.)
+  //   action:     "barColor" | "labelBold" | "labelColor" | "cardBorder" | "cardBackground" | "hide"
+  //   actionValue: string (hex) or boolean (true) depending on action
+  //
+  // Rules are evaluated top-to-bottom; all matching rules accumulate
+  // (later rules can override earlier ones for the same action).
+
+  const CF_OPERATORS = [
+    { value: "<",  label: "<  less than" },
+    { value: "<=", label: "≤  at most" },
+    { value: ">",  label: ">  greater than" },
+    { value: ">=", label: "≥  at least" },
+    { value: "==", label: "=  equals" },
+    { value: "!=", label: "≠  not equal" }
+  ];
+
+  const CF_FIELDS = [
+    { value: "value",       label: "Value" },
+    { value: "variance",    label: "Variance (abs)" },
+    { value: "variancePct", label: "Variance %" },
+    { value: "pctOfParent", label: "% of parent" },
+    { value: "pctOfTotal",  label: "% of total" },
+    { value: "rank",        label: "Rank" }
+  ];
+
+  const CF_ACTIONS = [
+    { value: "barColor",       label: "Bar color",        type: "color" },
+    { value: "labelBold",      label: "Bold label",       type: "boolean" },
+    { value: "labelColor",     label: "Label color",      type: "color" },
+    { value: "cardBorder",     label: "Card border color", type: "color" },
+    { value: "cardBackground", label: "Card background",  type: "color" },
+    { value: "hide",           label: "Hide node",        type: "boolean" }
+  ];
+
+  function evaluateCondition(operator, fieldValue, threshold) {
+    switch (operator) {
+      case "<":  return fieldValue <  threshold;
+      case "<=": return fieldValue <= threshold;
+      case ">":  return fieldValue >  threshold;
+      case ">=": return fieldValue >= threshold;
+      case "==": return fieldValue === threshold;
+      case "!=": return fieldValue !== threshold;
+      default:   return false;
+    }
+  }
+
+  function getNodeFieldValue(node, field) {
+    switch (field) {
+      case "value":       return toNumber(node.value);
+      case "variance":    return toNumber(node._variance);
+      case "variancePct": return node._variancePct ?? 0;
+      case "pctOfParent": return node._pctOfParent ?? 0;
+      case "pctOfTotal":  return node._pctOfTotal ?? 0;
+      case "rank":        return node._rank ?? 0;
+      default:            return 0;
+    }
+  }
+
+  // Evaluate all rules for a single node. Returns an object of actions
+  // that matched, keyed by action type:
+  //   { barColor: "#dc2626", labelBold: true, hide: true, ... }
+  function evaluateConditionalFormatting(node, rules) {
+    if (!rules || !rules.length) return null;
+    if (node.level === 0) return null;   // don't format root
+
+    let result = null;
+
+    for (const rule of rules) {
+      if (!rule.field || !rule.operator || !rule.action) continue;
+      const fieldValue = getNodeFieldValue(node, rule.field);
+      const threshold = toNumber(rule.value);
+
+      if (evaluateCondition(rule.operator, fieldValue, threshold)) {
+        if (!result) result = {};
+        result[rule.action] = rule.actionValue ?? true;
+      }
+    }
+    return result;
+  }
 
   /* ---------- Generic helpers ---------- */
 
@@ -661,15 +896,52 @@
       // Cached bound handlers + cleanup tickets so we don't leak listeners.
       this._docClickHandler = null;
       this._escHandler = null;
+
+      // Parsed conditional formatting rules (computed from JSON string).
+      this._cfRules = [];
+    }
+
+    _parseCfRules() {
+      try {
+        const raw = this._settings.conditionalFormattingRules;
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        this._cfRules = Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        this._cfRules = [];
+      }
     }
 
     connectedCallback() {
+      this._parseCfRules();
       this.tryRefreshFromBinding();
       this.render();
     }
 
     onCustomWidgetBeforeUpdate(changedProperties) {
+      // Theme preset: if changed, apply its palette before merging
+      if (changedProperties.themePreset &&
+          changedProperties.themePreset !== "custom") {
+        const preset = THEME_PRESETS[changedProperties.themePreset];
+        if (preset && preset.values) {
+          this._settings = { ...this._settings, ...preset.values };
+        }
+      }
+
+      // Density mode: if changed, apply its layout values
+      if (changedProperties.densityMode) {
+        const density = DENSITY_MODES[changedProperties.densityMode];
+        if (density && density.values) {
+          this._settings = { ...this._settings, ...density.values };
+        }
+      }
+
       this._settings = { ...this._settings, ...changedProperties };
+
+      // Parse conditional formatting rules from JSON string
+      if (changedProperties.conditionalFormattingRules !== undefined) {
+        this._parseCfRules();
+      }
+
       if (hasStructuralChange(changedProperties)) {
         this.rebuildAfterStructuralChange();
       }
@@ -1449,8 +1721,18 @@
           }
 
           const expanded = this._expanded.has(node.id);
-          const fill = this.getNodeColor(node);
+          let fill = this.getNodeColor(node);
           const displayLabel = this.getNodeDisplayLabel(node);
+
+          // Conditional formatting: evaluate rules for this node.
+          const cf = evaluateConditionalFormatting(node, this._cfRules);
+          if (cf && cf.hide) return "";   // hidden by CF rule
+          const cfBarColor       = cf && cf.barColor       ? cf.barColor       : null;
+          const cfLabelBold      = cf && cf.labelBold      ? true              : false;
+          const cfLabelColor     = cf && cf.labelColor     ? cf.labelColor     : null;
+          const cfCardBorder     = cf && cf.cardBorder     ? cf.cardBorder     : null;
+          const cfCardBackground = cf && cf.cardBackground ? cf.cardBackground : null;
+          if (cfBarColor) fill = cfBarColor;
 
           // "Change dimension" affordance: small icon, only in lazy mode,
           // only on nodes whose child level has more than one alternative.
@@ -1492,6 +1774,8 @@
                 width="${node.width}"
                 height="${node.height}"
                 rx="10"
+                ${cfCardBorder ? `style="stroke:${cfCardBorder};stroke-width:2"` : ""}
+                ${cfCardBackground ? `fill="${cfCardBackground}"` : ""}
               ></rect>
 
               ${
@@ -1510,7 +1794,7 @@
                   <rect x="${labelStartX}" y="${node.y}" width="${labelMaxWidth}" height="${node.height}"></rect>
                 </clipPath>
               </defs>
-              <text class="node-label" clip-path="url(#${labelClipId})" x="${labelStartX}" y="${node.y + 23}">${escapeXml(displayLabel)}</text>
+              <text class="node-label" clip-path="url(#${labelClipId})" x="${labelStartX}" y="${node.y + 23}" ${cfLabelColor ? `fill="${cfLabelColor}"` : ""} ${cfLabelBold ? `font-weight="900"` : ""}>${escapeXml(displayLabel)}</text>
 
               ${
                 showDimTag
@@ -2287,6 +2571,21 @@
      back into the main widget's onCustomWidgetBeforeUpdate hook. */
 
   const STYLING_FIELDS = [
+    { section: "Theme & Density" },
+    { prop: "themePreset",             label: "Color theme",              type: "select", options: [
+      { value: "custom",         label: "Custom (manual)" },
+      { value: "light",          label: "Light" },
+      { value: "dark",           label: "Dark" },
+      { value: "horizon",        label: "SAP Horizon" },
+      { value: "highContrast",   label: "High Contrast" },
+      { value: "printFriendly",  label: "Print-friendly" }
+    ]},
+    { prop: "densityMode",             label: "Density",                  type: "select", options: [
+      { value: "compact",     label: "Compact" },
+      { value: "comfortable", label: "Comfortable" },
+      { value: "spacious",    label: "Spacious" }
+    ]},
+
     { section: "Layout" },
     { prop: "nodeWidth",             label: "Node width (px)",          type: "number",  min: 80,  max: 600 },
     { prop: "nodeHeight",            label: "Node height (px)",         type: "number",  min: 30,  max: 200 },
@@ -2380,6 +2679,55 @@
     /* Push a single property change up to SAC. */
     emitChange(prop, value) {
       this._props[prop] = value;
+
+      // When a theme preset is chosen, apply its palette values and push
+      // them all at once so the main widget updates immediately.
+      if (prop === "themePreset" && value !== "custom") {
+        const preset = THEME_PRESETS[value];
+        if (preset && preset.values) {
+          const merged = { [prop]: value, ...preset.values };
+          Object.assign(this._props, preset.values);
+          this.dispatchEvent(
+            new CustomEvent("propertiesChanged", {
+              detail: { properties: merged }
+            })
+          );
+          this.syncControls();
+          return;
+        }
+      }
+
+      // When a density mode is chosen, push its layout values.
+      if (prop === "densityMode") {
+        const density = DENSITY_MODES[value];
+        if (density && density.values) {
+          const merged = { [prop]: value, ...density.values };
+          Object.assign(this._props, density.values);
+          this.dispatchEvent(
+            new CustomEvent("propertiesChanged", {
+              detail: { properties: merged }
+            })
+          );
+          this.syncControls();
+          return;
+        }
+      }
+
+      // Any manual color tweak switches theme to "custom"
+      const isColorProp = STYLING_FIELDS.some(f =>
+        f.prop === prop && f.type === "color"
+      );
+      if (isColorProp && this._props.themePreset !== "custom") {
+        this._props.themePreset = "custom";
+        this.dispatchEvent(
+          new CustomEvent("propertiesChanged", {
+            detail: { properties: { [prop]: value, themePreset: "custom" } }
+          })
+        );
+        this.syncControls();
+        return;
+      }
+
       this.dispatchEvent(
         new CustomEvent("propertiesChanged", {
           detail: { properties: { [prop]: value } }
@@ -2592,12 +2940,243 @@
             border-color: #0a6ed1;
             box-shadow: 0 0 0 1px #0a6ed1;
           }
+
+          /* Conditional formatting rule editor */
+          .cf-section {
+            margin-top: 12px;
+            border-top: 1px solid #e5e9ef;
+            padding-top: 8px;
+          }
+          .cf-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 8px;
+          }
+          .cf-title {
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: #556b82;
+          }
+          .cf-add-btn {
+            padding: 3px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            border: 1px solid #0a6ed1;
+            border-radius: 4px;
+            background: transparent;
+            color: #0a6ed1;
+            cursor: pointer;
+          }
+          .cf-add-btn:hover { background: #eef4fb; }
+          .cf-rule {
+            border: 1px solid #e5e9ef;
+            border-radius: 6px;
+            padding: 8px;
+            margin-bottom: 8px;
+            background: #fafbfc;
+          }
+          .cf-rule-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 6px;
+            flex-wrap: wrap;
+          }
+          .cf-rule-row:last-child { margin-bottom: 0; }
+          .cf-rule select, .cf-rule input[type="number"] {
+            padding: 3px 5px;
+            border: 1px solid #bfc8d4;
+            border-radius: 4px;
+            font: inherit;
+            font-size: 11px;
+            color: inherit;
+            background: #fff;
+            box-sizing: border-box;
+          }
+          .cf-rule select { min-width: 80px; }
+          .cf-rule input[type="number"] { width: 70px; }
+          .cf-rule input[type="color"] {
+            width: 30px;
+            height: 22px;
+            padding: 0;
+            border: 1px solid #bfc8d4;
+            border-radius: 3px;
+            cursor: pointer;
+          }
+          .cf-rule-label {
+            font-size: 10px;
+            color: #556b82;
+            font-weight: 600;
+            min-width: 30px;
+          }
+          .cf-remove-btn {
+            margin-left: auto;
+            padding: 2px 8px;
+            font-size: 10px;
+            border: 1px solid #dc2626;
+            border-radius: 3px;
+            background: transparent;
+            color: #dc2626;
+            cursor: pointer;
+          }
+          .cf-remove-btn:hover { background: #fef2f2; }
+          .cf-empty {
+            font-size: 11px;
+            color: #94a3b8;
+            font-style: italic;
+            padding: 4px 0;
+          }
         </style>
         ${rowsHtml}
+        ${this._renderCfEditor()}
       `;
 
       this._rendered = true;
       this.wireEvents();
+    }
+
+    _getCfRules() {
+      try {
+        const raw = this._props.conditionalFormattingRules;
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) {
+        return [];
+      }
+    }
+
+    _setCfRules(rules) {
+      const json = JSON.stringify(rules);
+      this.emitChange("conditionalFormattingRules", json);
+    }
+
+    _renderCfEditor() {
+      const rules = this._getCfRules();
+
+      const fieldOptions = CF_FIELDS
+        .map(f => `<option value="${f.value}">${escapeXml(f.label)}</option>`)
+        .join("");
+      const opOptions = CF_OPERATORS
+        .map(o => `<option value="${o.value}">${escapeXml(o.label)}</option>`)
+        .join("");
+      const actionOptions = CF_ACTIONS
+        .map(a => `<option value="${a.value}">${escapeXml(a.label)}</option>`)
+        .join("");
+
+      const rulesHtml = rules.length
+        ? rules.map((rule, idx) => {
+            const actionDef = CF_ACTIONS.find(a => a.value === rule.action) || CF_ACTIONS[0];
+            const showColorInput = actionDef.type === "color";
+            return `
+              <div class="cf-rule" data-cf-idx="${idx}">
+                <div class="cf-rule-row">
+                  <span class="cf-rule-label">If</span>
+                  <select data-cf-field="field" data-cf-idx="${idx}">
+                    ${CF_FIELDS.map(f =>
+                      `<option value="${f.value}" ${rule.field === f.value ? "selected" : ""}>${escapeXml(f.label)}</option>`
+                    ).join("")}
+                  </select>
+                  <select data-cf-field="operator" data-cf-idx="${idx}">
+                    ${CF_OPERATORS.map(o =>
+                      `<option value="${o.value}" ${rule.operator === o.value ? "selected" : ""}>${escapeXml(o.label)}</option>`
+                    ).join("")}
+                  </select>
+                  <input type="number" step="any" data-cf-field="value" data-cf-idx="${idx}" value="${rule.value ?? 0}" />
+                </div>
+                <div class="cf-rule-row">
+                  <span class="cf-rule-label">Then</span>
+                  <select data-cf-field="action" data-cf-idx="${idx}">
+                    ${CF_ACTIONS.map(a =>
+                      `<option value="${a.value}" ${rule.action === a.value ? "selected" : ""}>${escapeXml(a.label)}</option>`
+                    ).join("")}
+                  </select>
+                  ${showColorInput
+                    ? `<input type="color" data-cf-field="actionValue" data-cf-idx="${idx}" value="${rule.actionValue || "#dc2626"}" />`
+                    : ""
+                  }
+                  <button type="button" class="cf-remove-btn" data-cf-remove="${idx}">✕</button>
+                </div>
+              </div>
+            `;
+          }).join("")
+        : `<div class="cf-empty">No rules defined. Click + Add rule.</div>`;
+
+      return `
+        <div class="cf-section">
+          <div class="cf-header">
+            <span class="cf-title">Conditional Formatting</span>
+            <button type="button" class="cf-add-btn" data-cf-add>+ Add rule</button>
+          </div>
+          ${rulesHtml}
+        </div>
+      `;
+    }
+
+    _wireCfEvents() {
+      // Add rule
+      const addBtn = this.shadowRoot.querySelector("[data-cf-add]");
+      if (addBtn) {
+        addBtn.addEventListener("click", () => {
+          const rules = this._getCfRules();
+          rules.push({
+            field: "variancePct",
+            operator: "<",
+            value: -0.1,
+            action: "barColor",
+            actionValue: "#dc2626"
+          });
+          this._setCfRules(rules);
+          // Re-render the panel to show the new rule
+          this.render();
+        });
+      }
+
+      // Remove rule
+      this.shadowRoot.querySelectorAll("[data-cf-remove]").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const idx = Number(btn.getAttribute("data-cf-remove"));
+          const rules = this._getCfRules();
+          rules.splice(idx, 1);
+          this._setCfRules(rules);
+          this.render();
+        });
+      });
+
+      // Rule field changes
+      this.shadowRoot.querySelectorAll("[data-cf-field]").forEach(el => {
+        const changeEvent = el.type === "color" ? "input" : "change";
+        el.addEventListener(changeEvent, () => {
+          const idx = Number(el.getAttribute("data-cf-idx"));
+          const field = el.getAttribute("data-cf-field");
+          const rules = this._getCfRules();
+          if (!rules[idx]) return;
+
+          let val = el.value;
+          if (field === "value") {
+            val = Number(val);
+            if (!Number.isFinite(val)) val = 0;
+          }
+          rules[idx][field] = val;
+
+          // When action type changes, reset actionValue appropriately
+          if (field === "action") {
+            const actionDef = CF_ACTIONS.find(a => a.value === val);
+            if (actionDef && actionDef.type === "color") {
+              rules[idx].actionValue = rules[idx].actionValue || "#dc2626";
+            } else {
+              rules[idx].actionValue = true;
+            }
+            this._setCfRules(rules);
+            this.render(); // Re-render to show/hide color input
+            return;
+          }
+
+          this._setCfRules(rules);
+        });
+      });
     }
 
     wireEvents() {
@@ -2631,6 +3210,9 @@
             });
           }
         });
+
+      // Wire CF rule editor events
+      this._wireCfEvents();
     }
   }
 
