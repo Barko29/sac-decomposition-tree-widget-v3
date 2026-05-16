@@ -246,8 +246,9 @@
       case "<=": return fieldValue <= threshold;
       case ">":  return fieldValue >  threshold;
       case ">=": return fieldValue >= threshold;
-      case "==": return fieldValue === threshold;
-      case "!=": return fieldValue !== threshold;
+      // Use epsilon tolerance for float equality (pctOfParent, variancePct, etc.)
+      case "==": return Math.abs(fieldValue - threshold) < 1e-9;
+      case "!=": return Math.abs(fieldValue - threshold) >= 1e-9;
       default:   return false;
     }
   }
@@ -349,9 +350,10 @@
   }
 
   function formatNumber(value) {
+    if (value === null || value === undefined) return "—";
     return new Intl.NumberFormat(undefined, {
       maximumFractionDigits: 1
-    }).format(value || 0);
+    }).format(toNumber(value));
   }
 
   function formatPercent(fraction, decimals) {
@@ -423,7 +425,7 @@
   }
 
   function sortChildren(children, sortDescending) {
-    return children.sort((a, b) => {
+    return [...children].sort((a, b) => {
       const diff = Math.abs(b.value) - Math.abs(a.value);
       return sortDescending ? diff : -diff;
     });
@@ -572,7 +574,14 @@
     });
 
     function rollup(node) {
-      let total = toNumber(node.value);
+      if (node._childrenById.size === 0) {
+        // Leaf node: keep its own value.
+        return toNumber(node.value);
+      }
+      // Intermediate/root: value = sum of children only.
+      // This avoids double-counting when input data has both
+      // parent-level and leaf-level values.
+      let total = 0;
       node._childrenById.forEach(child => {
         total += rollup(child);
       });
@@ -670,7 +679,8 @@
   //   filters:     [{ alias, label }, ...] — must match these exactly
   //   groupBy:     alias of the dimension to bucket by
   //   settings:    for topN / sortDescending / enableOthers / othersLabel
-  function aggregateByDimension(dataset, filters, groupBy, settings) {
+  //   parentId:    id of the parent node (for unique Others id)
+  function aggregateByDimension(dataset, filters, groupBy, settings, parentId) {
     if (!dataset) return [];
 
     const buckets = new Map(); // label -> { id, label, value }
@@ -718,7 +728,7 @@
       const othersValue = hidden.reduce((s, c) => s + toNumber(c.value), 0);
       const othersPlan  = hidden.reduce((s, c) => s + toNumber(c.valuePlan), 0);
       visible.push({
-        id: "__others__",
+        id: parentId + "|__others__",
         label: settings.othersLabel || "Others",
         value: othersValue,
         valuePlan: othersPlan,
@@ -807,11 +817,29 @@
 
     function visit(node, level, parentVisibleIndex = null) {
       const visibleIndex = visible.length;
+      // Intentionally omit children from the spread to avoid
+      // leaking mutable array references into the flat list.
       visible.push({
-        ...node,
+        id: node.id,
+        label: node.label,
+        value: node.value,
+        valuePlan: node.valuePlan,
+        isOthers: node.isOthers,
+        hiddenChildrenCount: node.hiddenChildrenCount,
+        hiddenLabels: node.hiddenLabels,
+        filterPath: node.filterPath,
+        _siblingMax: node._siblingMax,
+        _siblingMaxCombined: node._siblingMaxCombined,
+        _pctOfParent: node._pctOfParent,
+        _pctOfTotal: node._pctOfTotal,
+        _rank: node._rank,
+        _siblingCount: node._siblingCount,
+        _variance: node._variance,
+        _variancePct: node._variancePct,
         level,
         visibleIndex,
-        parentVisibleIndex
+        parentVisibleIndex,
+        _hasChildren: !!(node.children && node.children.length > 0)
       });
       if (expandedSet.has(node.id) && node.children) {
         node.children.forEach(child => {
@@ -899,6 +927,10 @@
 
       // Parsed conditional formatting rules (computed from JSON string).
       this._cfRules = [];
+
+      // Render cache: avoid recomputing positions for hover card updates.
+      this._cachedPositioned = null;
+      this._cachedWidth = 700;
     }
 
     _parseCfRules() {
@@ -974,6 +1006,15 @@
         // Reset legacy mode if we now have a real binding.
         this._tree = [];
         this._lastPathRows = [];
+
+        // Prune stale _levelDimensions entries: if a dimension was
+        // removed from the binding feed, drop any level pinned to it.
+        const validAliases = new Set(dataset.dimensions.map(d => d.alias));
+        for (const [lvl, alias] of this._levelDimensions) {
+          if (!validAliases.has(alias)) {
+            this._levelDimensions.delete(lvl);
+          }
+        }
 
         // Pin the default level-1 dimension up front so the picker at
         // level 2 correctly excludes it from the choices. (Drilling at
@@ -1087,7 +1128,8 @@
         this._dataset,
         node.filterPath,
         groupBy,
-        this._settings
+        this._settings,
+        node.id
       );
 
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
@@ -1181,11 +1223,25 @@
         // A level is "active" if some node at level (lvl - 1) is expanded,
         // meaning its children at `lvl` are visible. Also always keep
         // ancestor levels (< excludeLevel) since they define the path.
-        if (lvl < excludeLevel || this._isLevelInUse(lvl)) {
+        if (lvl < excludeLevel || this._isLevelInUseCached(lvl)) {
           active.add(alias);
         }
       }
       return active;
+    }
+
+    // Cached wrapper: avoids repeated tree walks within a single render cycle.
+    _isLevelInUseCached(level) {
+      if (!this._levelInUseCache) this._levelInUseCache = new Map();
+      if (this._levelInUseCache.has(level)) return this._levelInUseCache.get(level);
+      const result = this._isLevelInUse(level);
+      this._levelInUseCache.set(level, result);
+      return result;
+    }
+
+    // Invalidate the cache at the start of each render/toggle cycle.
+    _clearLevelInUseCache() {
+      this._levelInUseCache = null;
     }
 
     // Check whether any node at (level - 1) is currently expanded,
@@ -1574,16 +1630,16 @@
     // Remove any expansion at or below the given level (root is level 0).
     _collapseBelowLevel(level) {
       if (!this._lazyTree) return;
-      const toDelete = [];
+      const toDelete = new Set();
       const visit = node => {
-        if (node.level >= level) toDelete.push(node.id);
+        if (node.level >= level) toDelete.add(node.id);
         if (node.children) node.children.forEach(visit);
       };
       visit(this._lazyTree);
-      toDelete.forEach(id => this._expanded.delete(id));
+      for (const id of toDelete) this._expanded.delete(id);
       // If the selected node lived at or below the affected level, its
       // filter context is no longer meaningful — drop it silently.
-      if (this._selectedNodeId && toDelete.includes(this._selectedNodeId)) {
+      if (this._selectedNodeId && toDelete.has(this._selectedNodeId)) {
         this._selectedNodeId = null;
       }
     }
@@ -1641,6 +1697,7 @@
 
     render() {
       if (!this.shadowRoot) return;
+      this._clearLevelInUseCache();
 
       const s = this._settings;
       const rootTree = this._lazyTree ? [this._lazyTree] : this._tree;
@@ -1681,22 +1738,11 @@
         40 + positioned.length * (s.nodeHeight + s.siblingGap)
       );
 
-      const byIndex = new Map(positioned.map(n => [n.visibleIndex, n]));
+      // Cache for hover card reuse (avoids recomputing on every mouseenter).
+      this._cachedPositioned = positioned;
+      this._cachedWidth = width;
 
-      const connectors = positioned
-        .filter(
-          n => n.parentVisibleIndex !== null && byIndex.has(n.parentVisibleIndex)
-        )
-        .map(n => {
-          const p = byIndex.get(n.parentVisibleIndex);
-          const x1 = p.x + p.width;
-          const y1 = p.y + p.height / 2;
-          const x2 = n.x;
-          const y2 = n.y + n.height / 2;
-          const mid = (x1 + x2) / 2;
-          return `<path class="connector" d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" />`;
-        })
-        .join("");
+      const byIndex = new Map(positioned.map(n => [n.visibleIndex, n]));
 
       const inLazyMode = !!this._lazyTree;
 
@@ -1713,7 +1759,65 @@
       const padR = Math.max(0, toNumber(s.paddingRight) || 14);
       const tagGap = Math.max(0, toNumber(s.labelTagGap) || 8);
 
-      const nodes = positioned
+      // Pre-compute CF hidden nodes: collect all node IDs that should be
+      // hidden (plus their descendants, to avoid orphans). Then re-filter
+      // positioned, re-index, and recompute Y positions so connectors
+      // and layout remain correct.
+      let renderNodes = positioned;
+      if (this._cfRules.length) {
+        const hiddenIds = new Set();
+        for (const n of positioned) {
+          if (hiddenIds.has(n.id)) continue; // already hidden by ancestor
+          const cf = evaluateConditionalFormatting(n, this._cfRules);
+          if (cf && cf.hide) {
+            // Hide this node and all its descendants
+            hiddenIds.add(n.id);
+            const hideDescendants = (nodes, parentIdx) => {
+              for (const child of nodes) {
+                if (child.parentVisibleIndex === parentIdx) {
+                  hiddenIds.add(child.id);
+                  hideDescendants(nodes, child.visibleIndex);
+                }
+              }
+            };
+            hideDescendants(positioned, n.visibleIndex);
+          }
+        }
+        if (hiddenIds.size) {
+          // Rebuild with correct Y positions and parent indices
+          const filtered = positioned.filter(n => !hiddenIds.has(n.id));
+          const oldToNew = new Map();
+          filtered.forEach((n, newIdx) => {
+            oldToNew.set(n.visibleIndex, newIdx);
+          });
+          renderNodes = filtered.map((n, newIdx) => ({
+            ...n,
+            visibleIndex: newIdx,
+            parentVisibleIndex: n.parentVisibleIndex !== null
+              ? (oldToNew.get(n.parentVisibleIndex) ?? null)
+              : null,
+            y: 20 + newIdx * (s.nodeHeight + s.siblingGap)
+          }));
+        }
+      }
+
+      // Rebuild byIndex, connectors, and dimensions after potential CF filtering
+      const byIndex2 = new Map(renderNodes.map(n => [n.visibleIndex, n]));
+      const connectors2 = renderNodes
+        .filter(n => n.parentVisibleIndex !== null && byIndex2.has(n.parentVisibleIndex))
+        .map(n => {
+          const p = byIndex2.get(n.parentVisibleIndex);
+          const x1 = p.x + p.width;
+          const y1 = p.y + p.height / 2;
+          const x2 = n.x;
+          const y2 = n.y + n.height / 2;
+          const mid = (x1 + x2) / 2;
+          return `<path class="connector" d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" />`;
+        })
+        .join("");
+      const renderHeight = Math.max(240, 40 + renderNodes.length * (s.nodeHeight + s.siblingGap));
+
+      const nodes = renderNodes
         .map(node => {
           const barX = node.x + padL;
           const barY = node.y + 31;
@@ -1751,13 +1855,14 @@
 
           // In lazy mode a node "has children" if it could be drilled
           // (not Others, and there's a dimension available for the next
-          // level). In static mode we trust the prebuilt children.
+          // level). In static mode we use the pre-computed flag from
+          // computeVisibleNodes.
           let hasChildren;
           if (inLazyMode) {
             hasChildren = !node.isOthers &&
               !!this._dimensionForLevel(node.level + 1);
           } else {
-            hasChildren = node.children && node.children.length > 0;
+            hasChildren = !!node._hasChildren;
           }
 
           const expanded = this._expanded.has(node.id);
@@ -1765,8 +1870,8 @@
           const displayLabel = this.getNodeDisplayLabel(node);
 
           // Conditional formatting: evaluate rules for this node.
+          // (Hide action already handled in pre-filter above.)
           const cf = evaluateConditionalFormatting(node, this._cfRules);
-          if (cf && cf.hide) return "";   // hidden by CF rule
           const cfBarColor       = cf && cf.barColor       ? cf.barColor       : null;
           const cfLabelBold      = cf && cf.labelBold      ? true              : false;
           const cfLabelColor     = cf && cf.labelColor     ? cf.labelColor     : null;
@@ -1887,8 +1992,8 @@
         .join("");
 
       // Picker overlay (HTML over SVG so we get easy hit testing + scroll).
-      const pickerHtml = this._renderPickerHtml(positioned);
-      const hoverHtml = this._renderHoverCardHtml(positioned, width);
+      const pickerHtml = this._renderPickerHtml(renderNodes);
+      const hoverHtml = this._renderHoverCardHtml(renderNodes, width);
       const bannerHtml = this._renderSelectionBannerHtml();
 
       this.shadowRoot.innerHTML =
@@ -1896,8 +2001,8 @@
         `
           <div class="viewport">
             ${bannerHtml}
-            <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Decomposition tree">
-              ${connectors}
+            <svg width="${width}" height="${renderHeight}" viewBox="0 0 ${width} ${renderHeight}" role="img" aria-label="Decomposition tree">
+              ${connectors2}
               ${nodes}
             </svg>
             ${hoverHtml}
@@ -1946,7 +2051,10 @@
       const node = this._findNodeById(this._hover.nodeId) || target;
 
       // Position: prefer right of the node card. If it would overflow the
-      // SVG width, flip to the left.
+      // SVG width, flip to the left. The hover card is absolutely positioned
+      // inside .viewport, so we must account for any elements above the SVG
+      // (e.g. the selection banner). The SVG element's offsetTop gives us
+      // the real vertical offset within the viewport container.
       const cardW = 240;
       const gap = 10;
       let left = target.x + target.width + gap;
@@ -1955,7 +2063,9 @@
         left = target.x - cardW - gap;
         arrowSide = "right";
       }
-      const top = target.y;
+      // Estimate banner offset: if there's a selection, the banner is ~36px
+      const bannerOffset = this._selectedNodeId ? 36 : 0;
+      const top = target.y + bannerOffset;
 
       // Build path breadcrumbs (lazy mode only — static mode has no path).
       let pathHtml = "";
@@ -2174,7 +2284,12 @@
             event.preventDefault();
             event.stopPropagation();
             const hasChildren = el.getAttribute("data-has-children") === "true";
-            if (hasChildren && nodeId) this.toggleNode(nodeId);
+            if (hasChildren && nodeId) {
+              this.toggleNode(nodeId);
+            } else if (nodeId) {
+              // Leaf node: select it (same as mouse click)
+              this.selectNode(nodeId);
+            }
           }
         });
 
@@ -2255,19 +2370,11 @@
 
       if (!this._hover) return;
 
-      // Recompute positioning data the same way render() does.
-      const s = this._settings;
-      const rootTree = this._lazyTree ? [this._lazyTree] : this._tree;
-      const visible = computeVisibleNodes(rootTree, this._expanded);
-      const positioned = visible.map((node, rowIndex) => ({
-        ...node,
-        x: 20 + node.level * (s.nodeWidth + s.levelGap),
-        y: 20 + rowIndex * (s.nodeHeight + s.siblingGap),
-        width: s.nodeWidth,
-        height: s.nodeHeight
-      }));
-      const maxLevel = Math.max(0, ...positioned.map(n => n.level));
-      const width = Math.max(700, 40 + (maxLevel + 1) * (s.nodeWidth + s.levelGap));
+      // Use cached positioned array from last render() instead of
+      // recomputing the full tree walk + positioning on every hover.
+      const positioned = this._cachedPositioned;
+      const width = this._cachedWidth;
+      if (!positioned || !positioned.length) return;
 
       const html = this._renderHoverCardHtml(positioned, width);
       if (!html) return;
