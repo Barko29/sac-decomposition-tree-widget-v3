@@ -1,8 +1,8 @@
 {
   "id": "com.company.sac.decompositiontree.v3",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "name": "Decomposition Tree v3",
-  "description": "Expandable left-to-right decomposition tree with synthetic Total root, drill-by-dimension picker, optional two-measure comparison with variance bars, Top-N + Others rollup, story-level selection events, and full theming control.",
+  "description": "Expandable left-to-right decomposition tree with synthetic Total root, drill-by-dimension picker, optional two-measure comparison with variance bars, Top-N + Others rollup, story-level selection events, theme presets, density modes, conditional formatting, and full theming control.",
   "newInstancePrefix": "DecompositionTree",
   "icon": "https://barko29.github.io/sac-decomposition-tree-widget-v3/icon.svg",
   "webcomponents": [
@@ -87,7 +87,10 @@
     "topN": { "type": "integer", "default": 10 },
     "enableOthers": { "type": "boolean", "default": true },
     "othersLabel": { "type": "string", "default": "Others" },
-    "sortDescending": { "type": "boolean", "default": true }
+    "sortDescending": { "type": "boolean", "default": true },
+    "themePreset": { "type": "string", "default": "light" },
+    "densityMode": { "type": "string", "default": "comfortable" },
+    "conditionalFormattingRules": { "type": "string", "default": "[]" }
   },
   "methods": {
     "expandAll": { "description": "Expands all nodes." },
