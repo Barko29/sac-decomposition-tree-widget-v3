@@ -1585,65 +1585,146 @@
         ...(options || {})
       };
 
-      const svgEl = this.shadowRoot.querySelector("svg");
+      const svgEl = this.shadowRoot.querySelector(".viewport > svg");
       if (!svgEl) return;
 
-      // Clone the SVG so we can inline styles without mutating the live DOM.
-      const clone = svgEl.cloneNode(true);
-      const w = svgEl.getAttribute("width");
-      const h = svgEl.getAttribute("height");
+      const w = Number(svgEl.getAttribute("width"));
+      const h = Number(svgEl.getAttribute("height"));
+      if (!w || !h) return;
 
-      // Inline all computed styles from the shadow DOM stylesheet.
-      // This is necessary because the Canvas renderer can't access
-      // the shadow DOM's <style> block.
-      this._inlineSvgStyles(clone);
+      // Build a self-contained SVG string with all styles embedded.
+      // This avoids cloneNode + getComputedStyle issues in shadow DOM.
+      const svgString = this._buildExportSvgString(svgEl, w, h, opts.background);
 
-      // Add background rect as first child
-      const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-      bgRect.setAttribute("width", "100%");
-      bgRect.setAttribute("height", "100%");
-      bgRect.setAttribute("fill", opts.background);
-      clone.insertBefore(bgRect, clone.firstChild);
-
-      // Serialize to data URL
-      const serializer = new XMLSerializer();
-      const svgString = serializer.serializeToString(clone);
-      const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
+      // Use base64 data URL (more reliable than blob URL in SAC's webview)
+      const base64 = btoa(unescape(encodeURIComponent(svgString)));
+      const dataUrl = "data:image/svg+xml;base64," + base64;
 
       const img = new Image();
       const scale = opts.scale;
+      const filename = opts.filename;
+
       img.onload = () => {
         const canvas = document.createElement("canvas");
-        canvas.width = Math.round(Number(w) * scale);
-        canvas.height = Math.round(Number(h) * scale);
+        canvas.width = Math.round(w * scale);
+        canvas.height = Math.round(h * scale);
         const ctx = canvas.getContext("2d");
         ctx.scale(scale, scale);
-        ctx.drawImage(img, 0, 0);
-        URL.revokeObjectURL(url);
+        ctx.drawImage(img, 0, 0, w, h);
 
-        canvas.toBlob(pngBlob => {
-          if (!pngBlob) return;
-          const pngUrl = URL.createObjectURL(pngBlob);
+        canvas.toBlob(blob => {
+          if (!blob) return;
+          const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
-          a.href = pngUrl;
-          a.download = opts.filename;
+          a.href = url;
+          a.download = filename;
+          a.style.display = "none";
           document.body.appendChild(a);
           a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(pngUrl);
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+          }, 100);
         }, "image/png");
       };
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
+
+      img.onerror = (e) => {
+        console.error("Decomposition Tree: PNG export failed", e);
       };
-      img.src = url;
+
+      img.src = dataUrl;
     }
 
-    // Apply visual styles directly to the cloned SVG elements using
-    // the widget's settings. This is more reliable than getComputedStyle
-    // because shadow DOM computed styles don't always propagate to
-    // cloned elements during Canvas rendering.
+    // Build a fully self-contained SVG string with embedded <style>,
+    // background rect, and the SVG namespace. This is more reliable
+    // than cloning DOM nodes because shadow DOM class attributes and
+    // computed styles don't always survive cloneNode + serialization.
+    _buildExportSvgString(svgEl, w, h, bgColor) {
+      const s = this._settings;
+      const shadowRgba = hexToRgba(s.nodeShadowColor, 0.18);
+
+      // Get the inner SVG content (connectors + nodes)
+      const innerSvg = svgEl.innerHTML;
+
+      // Build the embedded stylesheet — same rules as styles() but
+      // with all dynamic values baked in.
+      const css = `
+        svg { font-family: Arial, Helvetica, sans-serif; }
+        .node-card {
+          fill: ${s.nodeBackgroundColor};
+          stroke: ${s.nodeBorderColor};
+          filter: url(#dt-shadow);
+        }
+        .others-node .node-card { stroke-dasharray: 4 3; }
+        .node-label {
+          font-size: 12px;
+          font-weight: 600;
+          fill: ${s.labelColor};
+        }
+        .others-node .node-label { fill: ${s.othersLabelColor}; }
+        .value-label {
+          font-size: 11px;
+          fill: ${s.valueLabelColor};
+        }
+        .pct-label {
+          font-size: 11px;
+          font-weight: 600;
+          fill: ${s.labelColor};
+          opacity: 0.85;
+        }
+        .dim-tag {
+          font-size: 9px;
+          font-weight: 600;
+          letter-spacing: 0.03em;
+          fill: ${s.valueLabelColor};
+          opacity: 0.7;
+        }
+        .bar-bg { fill: ${s.barBackgroundColor}; }
+        .bar-plan { opacity: 0.55; }
+        .var-label {
+          font-size: 11px;
+          font-weight: 700;
+        }
+        .connector {
+          stroke: ${s.connectorColor};
+          stroke-width: 1.3;
+          fill: none;
+        }
+        .toggle circle {
+          fill: ${s.toggleBackgroundColor};
+          stroke: ${s.toggleBorderColor};
+        }
+        .toggle text {
+          font-size: 13px;
+          fill: ${s.toggleTextColor};
+        }
+        .change-dim rect, .change-dim text { opacity: 0; }
+        .dt-node.selected .node-card {
+          stroke: ${s.focusBorderColor};
+          stroke-width: 2.5;
+        }
+        .dt-node.selected .node-label { fill: ${s.focusBorderColor}; }
+        .dt-node.on-path .node-card {
+          stroke: ${s.focusBorderColor};
+          stroke-width: 1.5;
+        }
+        .dt-node.dimmed { opacity: 0.42; }
+      `;
+
+      return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+  <defs>
+    <style>${css}</style>
+    <filter id="dt-shadow" x="-5%" y="-5%" width="115%" height="120%">
+      <feDropShadow dx="0" dy="1" stdDeviation="1.5" flood-color="${s.nodeShadowColor}" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+  <rect width="${w}" height="${h}" fill="${bgColor}"/>
+  ${innerSvg}
+</svg>`;
+    }
+
+    // Legacy method kept for backward compatibility — no longer used
+    // by exportPng but may be called by scripting.
     _inlineSvgStyles(clonedSvg) {
       const s = this._settings;
 
