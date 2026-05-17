@@ -42,6 +42,10 @@
     // Conditional formatting rules (array of rule objects, stored as JSON string in SAC)
     conditionalFormattingRules: "[]",
 
+    // Export controls
+    showExportPng: true,
+    showExportCsv: true,
+
     // Cosmetic colors
     backgroundColor: "#f8fafc",
     nodeBackgroundColor: "#ffffff",
@@ -1636,35 +1640,148 @@
       img.src = url;
     }
 
-    // Walk the live SVG and apply computed styles inline to each
-    // element in the clone. This handles fill, stroke, font-size,
-    // font-weight, opacity, filter, etc.
+    // Apply visual styles directly to the cloned SVG elements using
+    // the widget's settings. This is more reliable than getComputedStyle
+    // because shadow DOM computed styles don't always propagate to
+    // cloned elements during Canvas rendering.
     _inlineSvgStyles(clonedSvg) {
-      const liveSvg = this.shadowRoot.querySelector("svg");
-      if (!liveSvg) return;
+      const s = this._settings;
 
-      const liveAll = liveSvg.querySelectorAll("*");
-      const cloneAll = clonedSvg.querySelectorAll("*");
+      // Background-level styles
+      clonedSvg.style.fontFamily = "Arial, sans-serif";
 
-      // CSS properties that affect SVG rendering
-      const PROPS = [
-        "fill", "stroke", "stroke-width", "stroke-dasharray",
-        "font-family", "font-size", "font-weight", "font-style",
-        "text-anchor", "opacity", "filter", "pointer-events",
-        "letter-spacing", "text-transform", "dominant-baseline",
-        "clip-path"
-      ];
+      // Create an SVG <filter> for the drop shadow (CSS filter doesn't
+      // work when the SVG is rendered via Canvas <img>).
+      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+      defs.innerHTML = `
+        <filter id="dt-export-shadow" x="-5%" y="-5%" width="115%" height="120%">
+          <feDropShadow dx="0" dy="1" stdDeviation="1.5"
+            flood-color="${s.nodeShadowColor}" flood-opacity="0.18" />
+        </filter>
+      `;
+      clonedSvg.insertBefore(defs, clonedSvg.firstChild);
 
-      for (let i = 0; i < liveAll.length && i < cloneAll.length; i++) {
-        const computed = window.getComputedStyle(liveAll[i]);
-        const style = cloneAll[i].style;
-        for (const prop of PROPS) {
-          const val = computed.getPropertyValue(prop);
-          if (val && val !== "none" && val !== "normal" && val !== "") {
-            style.setProperty(prop, val);
-          }
+      // Node cards
+      clonedSvg.querySelectorAll(".node-card").forEach(el => {
+        if (!el.getAttribute("fill") && !el.style.fill) {
+          el.setAttribute("fill", s.nodeBackgroundColor);
         }
-      }
+        if (!el.style.stroke) {
+          el.setAttribute("stroke", s.nodeBorderColor);
+        }
+        // Apply SVG filter for shadow (CSS filter won't work in Canvas)
+        el.setAttribute("filter", "url(#dt-export-shadow)");
+      });
+
+      // Dashed border for Others nodes
+      clonedSvg.querySelectorAll(".others-node .node-card").forEach(el => {
+        el.setAttribute("stroke-dasharray", "4 3");
+      });
+
+      // Node labels
+      clonedSvg.querySelectorAll(".node-label").forEach(el => {
+        if (!el.getAttribute("fill") || el.getAttribute("fill") === "") {
+          el.setAttribute("fill", s.labelColor);
+        }
+        el.style.fontSize = "12px";
+        el.style.fontWeight = el.getAttribute("font-weight") || "600";
+        el.style.fontFamily = "Arial, sans-serif";
+      });
+
+      // Others node labels
+      clonedSvg.querySelectorAll(".others-node .node-label").forEach(el => {
+        if (!el.getAttribute("fill") || el.getAttribute("fill") === s.labelColor) {
+          el.setAttribute("fill", s.othersLabelColor);
+        }
+      });
+
+      // Value labels
+      clonedSvg.querySelectorAll(".value-label").forEach(el => {
+        el.setAttribute("fill", s.valueLabelColor);
+        el.style.fontSize = "11px";
+        el.style.fontFamily = "Arial, sans-serif";
+      });
+
+      // Percent labels
+      clonedSvg.querySelectorAll(".pct-label").forEach(el => {
+        el.setAttribute("fill", s.labelColor);
+        el.style.fontSize = "11px";
+        el.style.fontWeight = "600";
+        el.style.fontFamily = "Arial, sans-serif";
+        el.style.opacity = "0.85";
+      });
+
+      // Variance labels (already have inline fill from render)
+      clonedSvg.querySelectorAll(".var-label").forEach(el => {
+        el.style.fontSize = "11px";
+        el.style.fontWeight = "700";
+        el.style.fontFamily = "Arial, sans-serif";
+      });
+
+      // Dimension tags
+      clonedSvg.querySelectorAll(".dim-tag").forEach(el => {
+        el.setAttribute("fill", s.valueLabelColor);
+        el.style.fontSize = "9px";
+        el.style.fontWeight = "600";
+        el.style.fontFamily = "Arial, sans-serif";
+        el.style.opacity = "0.7";
+        el.style.textTransform = "uppercase";
+        el.style.letterSpacing = "0.03em";
+      });
+
+      // Bar backgrounds
+      clonedSvg.querySelectorAll(".bar-bg").forEach(el => {
+        el.setAttribute("fill", s.barBackgroundColor);
+      });
+
+      // Plan bars (already have inline fill from render)
+      clonedSvg.querySelectorAll(".bar-plan").forEach(el => {
+        el.style.opacity = "0.55";
+      });
+
+      // Connectors
+      clonedSvg.querySelectorAll(".connector").forEach(el => {
+        el.setAttribute("stroke", s.connectorColor);
+        el.setAttribute("stroke-width", "1.3");
+        el.setAttribute("fill", "none");
+      });
+
+      // Toggle circles
+      clonedSvg.querySelectorAll(".toggle circle").forEach(el => {
+        el.setAttribute("fill", s.toggleBackgroundColor);
+        el.setAttribute("stroke", s.toggleBorderColor);
+      });
+
+      // Toggle text
+      clonedSvg.querySelectorAll(".toggle text").forEach(el => {
+        el.setAttribute("fill", s.toggleTextColor);
+        el.style.fontSize = "13px";
+        el.style.fontFamily = "Arial, sans-serif";
+      });
+
+      // Change-dim button (show it in export even though it's hover-only on screen)
+      clonedSvg.querySelectorAll(".change-dim rect").forEach(el => {
+        el.style.opacity = "0"; // keep hidden in export
+      });
+      clonedSvg.querySelectorAll(".change-dim text").forEach(el => {
+        el.style.opacity = "0";
+      });
+
+      // Selection styles
+      clonedSvg.querySelectorAll(".dt-node.selected .node-card").forEach(el => {
+        el.setAttribute("stroke", s.focusBorderColor);
+        el.setAttribute("stroke-width", "2.5");
+      });
+      clonedSvg.querySelectorAll(".dt-node.selected .node-label").forEach(el => {
+        el.setAttribute("fill", s.focusBorderColor);
+      });
+      clonedSvg.querySelectorAll(".dt-node.on-path .node-card").forEach(el => {
+        el.setAttribute("stroke", s.focusBorderColor);
+        el.setAttribute("stroke-width", "1.5");
+      });
+      clonedSvg.querySelectorAll(".dt-node.dimmed").forEach(el => {
+        el.style.opacity = "0.42";
+      });
     }
 
     /**
@@ -2413,21 +2530,28 @@
       const hoverHtml = this._renderHoverCardHtml(renderNodes, width);
       const bannerHtml = this._renderSelectionBannerHtml();
 
+      const showPngBtn = s.showExportPng !== false;
+      const showCsvBtn = s.showExportCsv !== false;
+      const showExportBar = showPngBtn || showCsvBtn;
+
+      const exportBarHtml = showExportBar ? `
+            <div class="export-toolbar" aria-label="Export options">
+              ${showPngBtn ? `<button type="button" class="export-btn" data-action="export-png" title="Export as PNG image">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 11l4-5 3 3.5 2-2 3 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.3"/></svg>
+                <span>PNG</span>
+              </button>` : ""}
+              ${showCsvBtn ? `<button type="button" class="export-btn" data-action="export-csv" title="Export as CSV data">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h8l3 3v11H1V1z" stroke="currentColor" stroke-width="1.3"/><path d="M4 8h8M4 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                <span>CSV</span>
+              </button>` : ""}
+            </div>` : "";
+
       this.shadowRoot.innerHTML =
         this.styles() +
         `
           <div class="viewport">
             ${bannerHtml}
-            <div class="export-toolbar" aria-label="Export options">
-              <button type="button" class="export-btn" data-action="export-png" title="Export as PNG image">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 11l4-5 3 3.5 2-2 3 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.3"/></svg>
-                <span>PNG</span>
-              </button>
-              <button type="button" class="export-btn" data-action="export-csv" title="Export as CSV data">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h8l3 3v11H1V1z" stroke="currentColor" stroke-width="1.3"/><path d="M4 8h8M4 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-                <span>CSV</span>
-              </button>
-            </div>
+            ${exportBarHtml}
             <svg width="${width}" height="${renderHeight}" viewBox="0 0 ${width} ${renderHeight}" role="img" aria-label="Decomposition tree">
               ${connectors2}
               ${nodes}
@@ -3278,7 +3402,11 @@
     { prop: "topN",                  label: "Top N per parent",         type: "number", min: 0, max: 100 },
     { prop: "enableOthers",          label: "Roll up rest into Others", type: "boolean" },
     { prop: "othersLabel",           label: "Others label",             type: "text"    },
-    { prop: "sortDescending",        label: "Sort descending by value", type: "boolean" }
+    { prop: "sortDescending",        label: "Sort descending by value", type: "boolean" },
+
+    { section: "Export" },
+    { prop: "showExportPng",         label: "Show PNG download button", type: "boolean" },
+    { prop: "showExportCsv",         label: "Show CSV download button", type: "boolean" }
   ];
 
   class DecompositionTreeStyling extends HTMLElement {
