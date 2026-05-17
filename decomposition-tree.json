@@ -90,7 +90,9 @@
     "sortDescending": { "type": "boolean", "default": true },
     "themePreset": { "type": "string", "default": "light" },
     "densityMode": { "type": "string", "default": "comfortable" },
-    "conditionalFormattingRules": { "type": "string", "default": "[]" }
+    "conditionalFormattingRules": { "type": "string", "default": "[]" },
+    "showExportPng": { "type": "boolean", "default": true },
+    "showExportCsv": { "type": "boolean", "default": true }
   },
   "methods": {
     "expandAll": { "description": "Expands all nodes." },
