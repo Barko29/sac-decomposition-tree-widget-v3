@@ -1,6 +1,6 @@
 {
   "id": "com.company.sac.decompositiontree.v3",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "name": "Decomposition Tree v3",
   "description": "Expandable left-to-right decomposition tree with synthetic Total root, drill-by-dimension picker, optional two-measure comparison with variance bars, Top-N + Others rollup, story-level selection events, theme presets, density modes, conditional formatting, and full theming control.",
   "newInstancePrefix": "DecompositionTree",
