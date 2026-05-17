@@ -46,6 +46,10 @@
     showExportPng: true,
     showExportCsv: true,
 
+    // Interaction controls
+    enableNodeDrag: true,
+    enableZoomPan: true,
+
     // Cosmetic colors
     backgroundColor: "#f8fafc",
     nodeBackgroundColor: "#ffffff",
@@ -935,6 +939,17 @@
       // Render cache: avoid recomputing positions for hover card updates.
       this._cachedPositioned = null;
       this._cachedWidth = 700;
+
+      // Node drag offsets: Map<nodeId, { dx, dy }>.
+      // Applied on top of the computed default positions.
+      this._nodeOffsets = new Map();
+      this._dragState = null;  // { nodeId, startMouseX, startMouseY, startDx, startDy }
+
+      // Zoom/pan state
+      this._zoom = 1;
+      this._panX = 0;
+      this._panY = 0;
+      this._panState = null;   // { startMouseX, startMouseY, startPanX, startPanY }
     }
 
     _parseCfRules() {
@@ -994,6 +1009,7 @@
 
     onCustomWidgetDestroy() {
       this._clearHoverTimers();
+      if (this._zoomRenderTimer) { clearTimeout(this._zoomRenderTimer); this._zoomRenderTimer = null; }
       this._teardownGlobalListeners();
       this.shadowRoot.innerHTML = "";
     }
@@ -1585,7 +1601,7 @@
         ...(options || {})
       };
 
-      const svgEl = this.shadowRoot.querySelector(".viewport > svg");
+      const svgEl = this.shadowRoot.querySelector(".dt-main-svg");
       if (!svgEl) return;
 
       const w = Number(svgEl.getAttribute("width"));
@@ -2335,22 +2351,31 @@
         return;
       }
 
-      const positioned = visible.map((node, rowIndex) => ({
-        ...node,
-        x: 20 + node.level * (s.nodeWidth + s.levelGap),
-        y: 20 + rowIndex * (s.nodeHeight + s.siblingGap),
-        width: s.nodeWidth,
-        height: s.nodeHeight
-      }));
+      const positioned = visible.map((node, rowIndex) => {
+        const off = this._nodeOffsets.get(node.id);
+        return {
+          ...node,
+          x: 20 + node.level * (s.nodeWidth + s.levelGap) + (off ? off.dx : 0),
+          y: 20 + rowIndex * (s.nodeHeight + s.siblingGap) + (off ? off.dy : 0),
+          _defaultX: 20 + node.level * (s.nodeWidth + s.levelGap),
+          _defaultY: 20 + rowIndex * (s.nodeHeight + s.siblingGap),
+          width: s.nodeWidth,
+          height: s.nodeHeight
+        };
+      });
 
       const maxLevel = Math.max(0, ...positioned.map(n => n.level));
+      const maxX = Math.max(700, ...positioned.map(n => n.x + n.width + 20));
+      const maxY = Math.max(240, ...positioned.map(n => n.y + n.height + 20));
       const width = Math.max(
         700,
-        40 + (maxLevel + 1) * (s.nodeWidth + s.levelGap)
+        40 + (maxLevel + 1) * (s.nodeWidth + s.levelGap),
+        maxX
       );
       const height = Math.max(
         240,
-        40 + positioned.length * (s.nodeHeight + s.siblingGap)
+        40 + positioned.length * (s.nodeHeight + s.siblingGap),
+        maxY
       );
 
       // Cache for hover card reuse (avoids recomputing on every mouseenter).
@@ -2614,9 +2639,32 @@
       const showPngBtn = s.showExportPng !== false;
       const showCsvBtn = s.showExportCsv !== false;
       const showExportBar = showPngBtn || showCsvBtn;
+      const showDrag = s.enableNodeDrag !== false;
+      const showZoom = s.enableZoomPan !== false;
+      const hasOffsets = this._nodeOffsets.size > 0;
+      const isZoomed = this._zoom !== 1 || this._panX !== 0 || this._panY !== 0;
+      const showReset = hasOffsets || isZoomed;
 
-      const exportBarHtml = showExportBar ? `
-            <div class="export-toolbar" aria-label="Export options">
+      const exportBarHtml = showExportBar || showReset || showZoom ? `
+            <div class="export-toolbar" aria-label="Toolbar">
+              ${showZoom ? `
+                <button type="button" class="export-btn" data-action="zoom-in" title="Zoom in">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M5 7h4M7 5v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                </button>
+                <span class="zoom-label">${Math.round(this._zoom * 100)}%</span>
+                <button type="button" class="export-btn" data-action="zoom-out" title="Zoom out">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M5 7h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                </button>
+                <button type="button" class="export-btn" data-action="zoom-fit" title="Fit to view">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h4V2M10 2v4h4M14 10h-4v4M6 14v-4H2" stroke="currentColor" stroke-width="1.1"/></svg>
+                </button>
+              ` : ""}
+              ${showReset ? `
+                <button type="button" class="export-btn" data-action="reset-layout" title="Reset positions & zoom">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 8a6 6 0 0111.3-2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M14 8a6 6 0 01-11.3 2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M13 2v3.2h-3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  <span>Reset</span>
+                </button>
+              ` : ""}
               ${showPngBtn ? `<button type="button" class="export-btn" data-action="export-png" title="Export as PNG image">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 11l4-5 3 3.5 2-2 3 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.3"/></svg>
                 <span>PNG</span>
@@ -2627,15 +2675,23 @@
               </button>` : ""}
             </div>` : "";
 
+      // Zoom/pan: wrap all SVG content in a <g> with transform
+      const zoomTransform = showZoom
+        ? `translate(${this._panX},${this._panY}) scale(${this._zoom})`
+        : "";
+      const svgCursor = showZoom ? (this._panState ? "grabbing" : "grab") : "default";
+
       this.shadowRoot.innerHTML =
         this.styles() +
         `
-          <div class="viewport">
+          <div class="viewport" style="cursor:${showDrag ? "default" : "auto"}">
             ${bannerHtml}
             ${exportBarHtml}
-            <svg width="${width}" height="${renderHeight}" viewBox="0 0 ${width} ${renderHeight}" role="img" aria-label="Decomposition tree">
-              ${connectors2}
-              ${nodes}
+            <svg class="dt-main-svg" width="${width}" height="${renderHeight}" viewBox="0 0 ${width} ${renderHeight}" role="img" aria-label="Decomposition tree" style="cursor:${svgCursor}">
+              <g class="dt-zoom-group" ${zoomTransform ? `transform="${zoomTransform}"` : ""}>
+                ${connectors2}
+                ${nodes}
+              </g>
             </svg>
             ${hoverHtml}
             ${pickerHtml}
@@ -2863,6 +2919,18 @@
       if (!root) return;
 
       root.addEventListener("click", event => {
+        const zoomInEl = event.target.closest("[data-action='zoom-in']");
+        if (zoomInEl) { event.preventDefault(); event.stopPropagation(); this._zoomBy(0.15); return; }
+
+        const zoomOutEl = event.target.closest("[data-action='zoom-out']");
+        if (zoomOutEl) { event.preventDefault(); event.stopPropagation(); this._zoomBy(-0.15); return; }
+
+        const zoomFitEl = event.target.closest("[data-action='zoom-fit']");
+        if (zoomFitEl) { event.preventDefault(); event.stopPropagation(); this._zoomFit(); return; }
+
+        const resetEl = event.target.closest("[data-action='reset-layout']");
+        if (resetEl) { event.preventDefault(); event.stopPropagation(); this.resetLayout(); return; }
+
         const exportPngEl = event.target.closest("[data-action='export-png']");
         if (exportPngEl) {
           event.preventDefault();
@@ -2961,6 +3029,309 @@
           this._hideHoverNow();
         });
       });
+
+      // ----- Node drag -----
+      if (this._settings.enableNodeDrag !== false) {
+        this._wireDragEvents();
+      }
+
+      // ----- Zoom/pan via mouse wheel and middle-click drag -----
+      if (this._settings.enableZoomPan !== false) {
+        this._wireZoomPanEvents();
+      }
+    }
+
+    _wireDragEvents() {
+      const svg = this.shadowRoot.querySelector(".dt-main-svg");
+      if (!svg) return;
+
+      // Use pointer events for unified mouse+touch handling
+      svg.addEventListener("pointerdown", e => {
+        // Only left button
+        if (e.button !== 0) return;
+
+        const nodeEl = e.target.closest(".dt-node");
+        if (!nodeEl) return;
+
+        // Don't drag if clicking on toggle or change-dim buttons
+        if (e.target.closest("[data-action='toggle']") ||
+            e.target.closest("[data-action='change-dim']")) return;
+
+        const nodeId = nodeEl.getAttribute("data-node-id");
+        if (!nodeId) return;
+
+        const off = this._nodeOffsets.get(nodeId) || { dx: 0, dy: 0 };
+        // Convert screen coords to SVG coords accounting for zoom
+        const pt = this._screenToSvg(e.clientX, e.clientY);
+
+        this._dragState = {
+          nodeId,
+          startSvgX: pt.x,
+          startSvgY: pt.y,
+          startDx: off.dx,
+          startDy: off.dy,
+          moved: false
+        };
+
+        nodeEl.style.cursor = "grabbing";
+        svg.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      });
+
+      svg.addEventListener("pointermove", e => {
+        if (!this._dragState) return;
+
+        const pt = this._screenToSvg(e.clientX, e.clientY);
+        const dx = this._dragState.startDx + (pt.x - this._dragState.startSvgX);
+        const dy = this._dragState.startDy + (pt.y - this._dragState.startSvgY);
+
+        // Only start dragging after a small threshold to avoid accidental drags
+        if (!this._dragState.moved) {
+          const dist = Math.abs(pt.x - this._dragState.startSvgX) +
+                       Math.abs(pt.y - this._dragState.startSvgY);
+          if (dist < 4) return;
+          this._dragState.moved = true;
+        }
+
+        this._nodeOffsets.set(this._dragState.nodeId, { dx, dy });
+        this._updateDraggedNode(this._dragState.nodeId, dx, dy);
+      });
+
+      svg.addEventListener("pointerup", e => {
+        if (!this._dragState) return;
+        const wasDrag = this._dragState.moved;
+        this._dragState = null;
+        svg.releasePointerCapture(e.pointerId);
+
+        if (wasDrag) {
+          // Full re-render to update connectors and cache
+          this.render();
+        }
+      });
+    }
+
+    // Convert screen coordinates to SVG coordinate space (accounting for zoom/pan)
+    _screenToSvg(clientX, clientY) {
+      const svg = this.shadowRoot.querySelector(".dt-main-svg");
+      if (!svg) return { x: clientX, y: clientY };
+
+      const rect = svg.getBoundingClientRect();
+      const viewBox = svg.viewBox.baseVal;
+      const scaleX = viewBox.width / rect.width;
+      const scaleY = viewBox.height / rect.height;
+
+      // Screen → SVG viewBox coords
+      let x = (clientX - rect.left) * scaleX;
+      let y = (clientY - rect.top) * scaleY;
+
+      // Undo the zoom/pan transform
+      x = (x - this._panX) / this._zoom;
+      y = (y - this._panY) / this._zoom;
+
+      return { x, y };
+    }
+
+    // Live-update a single dragged node without full re-render
+    _updateDraggedNode(nodeId, dx, dy) {
+      const nodeEl = this.shadowRoot.querySelector(
+        `.dt-node[data-node-id="${nodeId.replace(/"/g, '\\"')}"]`
+      );
+      if (!nodeEl) return;
+
+      // Find the node's default position from cache
+      const cached = this._cachedPositioned;
+      if (!cached) return;
+      const nodeData = cached.find(n => n.id === nodeId);
+      if (!nodeData) return;
+
+      const newX = nodeData._defaultX + dx;
+      const newY = nodeData._defaultY + dy;
+      const s = this._settings;
+      const padL = Math.max(0, toNumber(s.paddingLeft) || 14);
+
+      // Move the entire <g> via transform
+      nodeEl.setAttribute("transform", `translate(${dx},${dy})`);
+
+      // Update connectors that touch this node (parent→this, this→children)
+      this._updateConnectors(nodeId, newX, newY);
+    }
+
+    // Redraw connectors touching a specific node during drag
+    _updateConnectors(nodeId, newX, newY) {
+      const cached = this._cachedPositioned;
+      if (!cached) return;
+      const nodeData = cached.find(n => n.id === nodeId);
+      if (!nodeData) return;
+
+      const svg = this.shadowRoot.querySelector(".dt-zoom-group");
+      if (!svg) return;
+
+      // Rebuild all connectors (simple approach — works because connector
+      // count is small relative to drag frame rate)
+      const byIndex = new Map(cached.map(n => [n.visibleIndex, n]));
+
+      // Recompute positions with current offsets
+      const getPos = (n) => {
+        const off = this._nodeOffsets.get(n.id) || { dx: 0, dy: 0 };
+        return {
+          x: n._defaultX + off.dx,
+          y: n._defaultY + off.dy,
+          w: n.width,
+          h: n.height
+        };
+      };
+
+      const connectors = svg.querySelectorAll("path.connector");
+      let connIdx = 0;
+
+      for (const n of cached) {
+        if (n.parentVisibleIndex === null || !byIndex.has(n.parentVisibleIndex)) continue;
+        const p = byIndex.get(n.parentVisibleIndex);
+        const pPos = getPos(p);
+        const nPos = getPos(n);
+
+        const x1 = pPos.x + pPos.w;
+        const y1 = pPos.y + pPos.h / 2;
+        const x2 = nPos.x;
+        const y2 = nPos.y + nPos.h / 2;
+        const mid = (x1 + x2) / 2;
+
+        if (connectors[connIdx]) {
+          connectors[connIdx].setAttribute("d",
+            `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`
+          );
+        }
+        connIdx++;
+      }
+    }
+
+    _wireZoomPanEvents() {
+      const svg = this.shadowRoot.querySelector(".dt-main-svg");
+      if (!svg) return;
+
+      // Wheel zoom: zoom toward cursor position
+      svg.addEventListener("wheel", e => {
+        e.preventDefault();
+        const delta = e.deltaY > 0 ? -0.08 : 0.08;
+        this._zoomBy(delta, e.clientX, e.clientY);
+      }, { passive: false });
+
+      // Middle-click or Ctrl+left-click pan
+      svg.addEventListener("pointerdown", e => {
+        if (e.button === 1 || (e.button === 0 && (e.ctrlKey || e.metaKey))) {
+          e.preventDefault();
+          this._panState = {
+            startMouseX: e.clientX,
+            startMouseY: e.clientY,
+            startPanX: this._panX,
+            startPanY: this._panY
+          };
+          svg.setPointerCapture(e.pointerId);
+          svg.style.cursor = "grabbing";
+        }
+      });
+
+      svg.addEventListener("pointermove", e => {
+        if (!this._panState) return;
+
+        const rect = svg.getBoundingClientRect();
+        const viewBox = svg.viewBox.baseVal;
+        const scaleX = viewBox.width / rect.width;
+        const scaleY = viewBox.height / rect.height;
+
+        this._panX = this._panState.startPanX +
+          (e.clientX - this._panState.startMouseX) * scaleX;
+        this._panY = this._panState.startPanY +
+          (e.clientY - this._panState.startMouseY) * scaleY;
+
+        const group = svg.querySelector(".dt-zoom-group");
+        if (group) {
+          group.setAttribute("transform",
+            `translate(${this._panX},${this._panY}) scale(${this._zoom})`
+          );
+        }
+      });
+
+      svg.addEventListener("pointerup", e => {
+        if (!this._panState) return;
+        this._panState = null;
+        svg.releasePointerCapture(e.pointerId);
+        svg.style.cursor = "grab";
+      });
+    }
+
+    _zoomBy(delta, clientX, clientY) {
+      const oldZoom = this._zoom;
+      this._zoom = Math.max(0.2, Math.min(3, this._zoom + delta));
+
+      // If cursor position is provided, zoom toward it
+      if (clientX !== undefined && clientY !== undefined) {
+        const svg = this.shadowRoot.querySelector(".dt-main-svg");
+        if (svg) {
+          const rect = svg.getBoundingClientRect();
+          const viewBox = svg.viewBox.baseVal;
+          const scaleX = viewBox.width / rect.width;
+          const scaleY = viewBox.height / rect.height;
+
+          // Cursor position in SVG viewBox coords
+          const cx = (clientX - rect.left) * scaleX;
+          const cy = (clientY - rect.top) * scaleY;
+
+          // Adjust pan so the point under the cursor stays fixed
+          this._panX = cx - (cx - this._panX) * (this._zoom / oldZoom);
+          this._panY = cy - (cy - this._panY) * (this._zoom / oldZoom);
+        }
+      }
+
+      // Live-update the transform without full re-render
+      const group = this.shadowRoot.querySelector(".dt-zoom-group");
+      if (group) {
+        group.setAttribute("transform",
+          `translate(${this._panX},${this._panY}) scale(${this._zoom})`
+        );
+      }
+
+      // Update the zoom label
+      const label = this.shadowRoot.querySelector(".zoom-label");
+      if (label) label.textContent = Math.round(this._zoom * 100) + "%";
+
+      // Show/hide reset button via re-render (debounced)
+      if (this._zoomRenderTimer) clearTimeout(this._zoomRenderTimer);
+      this._zoomRenderTimer = setTimeout(() => {
+        this._zoomRenderTimer = null;
+        // Only re-render if reset button visibility changed
+        const showReset = this._nodeOffsets.size > 0 ||
+          this._zoom !== 1 || this._panX !== 0 || this._panY !== 0;
+        const resetBtn = this.shadowRoot.querySelector("[data-action='reset-layout']");
+        if (showReset && !resetBtn) this.render();
+      }, 300);
+    }
+
+    _zoomFit() {
+      const viewport = this.shadowRoot.querySelector(".viewport");
+      const svg = this.shadowRoot.querySelector(".dt-main-svg");
+      if (!viewport || !svg) return;
+
+      const vw = viewport.clientWidth;
+      const vh = viewport.clientHeight;
+      const viewBox = svg.viewBox.baseVal;
+      if (!viewBox.width || !viewBox.height) return;
+
+      const scaleX = vw / viewBox.width;
+      const scaleY = vh / viewBox.height;
+      this._zoom = Math.max(0.2, Math.min(2, Math.min(scaleX, scaleY) * 0.92));
+      this._panX = 0;
+      this._panY = 0;
+
+      this.render();
+    }
+
+    resetLayout() {
+      this._nodeOffsets.clear();
+      this._zoom = 1;
+      this._panX = 0;
+      this._panY = 0;
+      this.render();
     }
 
     _scheduleHoverShow(nodeId) {
@@ -3187,7 +3558,6 @@
           .dt-node:hover .change-dim text,
           .dt-node:focus .change-dim rect,
           .dt-node:focus .change-dim text { opacity: 1; }
-          .dt-node { cursor: pointer; outline: none; pointer-events: all; }
           .dt-node .toggle { cursor: pointer; }
           .dt-node:focus .node-card { stroke: ${s.focusBorderColor}; stroke-width: 2; }
 
@@ -3393,6 +3763,17 @@
             color: ${s.labelColor};
           }
           .export-btn svg { flex: 0 0 auto; }
+          .zoom-label {
+            font-size: 10px;
+            font-weight: 600;
+            color: ${s.valueLabelColor};
+            min-width: 30px;
+            text-align: center;
+            pointer-events: all;
+            user-select: none;
+          }
+          .dt-node { cursor: ${s.enableNodeDrag !== false ? "grab" : "pointer"}; outline: none; pointer-events: all; }
+          .dt-node:active { cursor: ${s.enableNodeDrag !== false ? "grabbing" : "pointer"}; }
         </style>
       `;
     }
@@ -3487,7 +3868,11 @@
 
     { section: "Export" },
     { prop: "showExportPng",         label: "Show PNG download button", type: "boolean" },
-    { prop: "showExportCsv",         label: "Show CSV download button", type: "boolean" }
+    { prop: "showExportCsv",         label: "Show CSV download button", type: "boolean" },
+
+    { section: "Interaction" },
+    { prop: "enableNodeDrag",        label: "Allow dragging nodes",     type: "boolean" },
+    { prop: "enableZoomPan",         label: "Enable zoom & pan",        type: "boolean" }
   ];
 
   class DecompositionTreeStyling extends HTMLElement {
