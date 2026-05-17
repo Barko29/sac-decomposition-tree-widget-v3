@@ -99,7 +99,12 @@
     "setData": { "description": "Sets data from script for local testing or advanced use." },
     "selectNode": { "description": "Programmatically select a node by its ID. Fires onNodeSelected." },
     "clearSelection": { "description": "Clear the current selection. Fires onNodeDeselected if there was one." },
-    "getSelection": { "description": "Returns the current selection payload (nodeId, label, value, filters[], etc.) or null." }
+    "getSelection": { "description": "Returns the current selection payload (nodeId, label, value, filters[], etc.) or null." },
+    "expandPath": { "description": "Drill into the tree by member labels, e.g. expandPath(['EMEA','Germany']). Returns { ok, depth, nodeId }." },
+    "getState": { "description": "Returns a serializable snapshot of expansion, level-dimension choices, and selection for bookmark persistence." },
+    "setState": { "description": "Restores the widget to a previously saved state from getState(). Re-materializes expanded subtrees." },
+    "exportPng": { "description": "Exports the visible tree as a PNG image download. Options: { filename, scale, background }." },
+    "exportCsv": { "description": "Exports the visible tree as a CSV file download. Options: { filename, separator, includeHidden }." }
   },
   "events": {
     "onNodeClick": { "description": "Triggered when a node is clicked (legacy, retained for backward compatibility). Same payload as onNodeSelected." },
