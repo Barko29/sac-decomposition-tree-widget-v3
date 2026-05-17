@@ -1372,6 +1372,423 @@
 
     /* ---------- Scripting API ---------- */
 
+    /**
+     * expandPath(labels, options?)
+     *
+     * Programmatically drill into the tree along a member-label path.
+     *
+     *   widget.expandPath(["EMEA", "Germany", "Widget A"]);
+     *
+     * Each element is matched by label against materialized children at
+     * the corresponding level.  The method materializes children lazily
+     * as it walks, so the path does NOT need to be pre-expanded.
+     *
+     * Options (all optional):
+     *   select:  boolean (default true) — select the deepest reached node
+     *   scroll:  boolean (default true) — scroll the node into view
+     *
+     * Returns { ok, depth, nodeId }:
+     *   ok:     true if the FULL path was matched
+     *   depth:  how many levels were successfully matched (0 = none)
+     *   nodeId: id of the deepest matched node (null if depth === 0)
+     */
+    expandPath(labels, options) {
+      if (!Array.isArray(labels) || !labels.length) {
+        return { ok: false, depth: 0, nodeId: null };
+      }
+      const opts = { select: true, scroll: true, ...(options || {}) };
+
+      // Always start from root
+      if (!this._lazyTree && !this._tree.length) {
+        return { ok: false, depth: 0, nodeId: null };
+      }
+
+      const inLazy = !!this._lazyTree;
+      let current = inLazy ? this._lazyTree : this._tree[0];
+      if (!current) return { ok: false, depth: 0, nodeId: null };
+
+      // Expand root first
+      this._expanded.add(current.id);
+      if (inLazy) this._materializeChildren(current);
+
+      let matchedDepth = 0;
+      let lastMatchedNode = current;
+
+      for (let i = 0; i < labels.length; i++) {
+        const targetLabel = String(labels[i]);
+
+        if (!current.children || !current.children.length) break;
+
+        // Find the child whose label matches (case-sensitive)
+        const child = current.children.find(
+          c => c.label === targetLabel
+        );
+
+        if (!child) break;
+
+        matchedDepth = i + 1;
+        lastMatchedNode = child;
+
+        // Expand this child so its subtree is visible
+        this._expanded.add(child.id);
+        if (inLazy) this._materializeChildren(child);
+
+        current = child;
+      }
+
+      const ok = matchedDepth === labels.length;
+
+      // Optionally select the deepest matched node
+      if (opts.select && lastMatchedNode && lastMatchedNode.id !== "__root__") {
+        this._selectedNodeId = lastMatchedNode.id;
+        const detail = this._buildSelectionDetail(lastMatchedNode);
+        this.dispatchEvent(new CustomEvent("onNodeSelected", { detail }));
+      }
+
+      this.render();
+
+      // Optionally scroll the target node into view
+      if (opts.scroll && lastMatchedNode) {
+        const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : null;
+        if (raf) {
+          const targetId = lastMatchedNode.id;
+          raf(() => {
+            const el = this.shadowRoot.querySelector(
+              `[data-node-id="${targetId.replace(/["\\]/g, '\\$&')}"]`
+            );
+            if (el && typeof el.scrollIntoView === "function") {
+              el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+            }
+          });
+        }
+      }
+
+      return { ok, depth: matchedDepth, nodeId: lastMatchedNode ? lastMatchedNode.id : null };
+    }
+
+    /**
+     * getState()
+     *
+     * Returns a plain, JSON-serializable object capturing the current
+     * UI state of the widget:
+     *
+     *   {
+     *     expanded:        [ ...nodeId strings ],
+     *     levelDimensions: { "1": "dim_region", "2": "dim_country" },
+     *     selectedNodeId:  "..." | null
+     *   }
+     *
+     * Intended for SAC bookmark persistence and scripting save/restore.
+     */
+    getState() {
+      const levelDims = {};
+      for (const [lvl, alias] of this._levelDimensions) {
+        levelDims[String(lvl)] = alias;
+      }
+      return {
+        expanded: Array.from(this._expanded),
+        levelDimensions: levelDims,
+        selectedNodeId: this._selectedNodeId || null
+      };
+    }
+
+    /**
+     * setState(state)
+     *
+     * Restores the widget to a previously saved state (from getState).
+     * Re-materializes all expanded subtrees against the current dataset,
+     * so it works correctly even if the data has changed since the state
+     * was saved (missing nodes are silently skipped).
+     *
+     * Fires onNodeSelected if the restored state includes a selection.
+     */
+    setState(state) {
+      if (!state || typeof state !== "object") return;
+
+      // Restore level-dimension choices
+      this._levelDimensions.clear();
+      if (state.levelDimensions && typeof state.levelDimensions === "object") {
+        for (const [lvl, alias] of Object.entries(state.levelDimensions)) {
+          const n = Number(lvl);
+          if (Number.isFinite(n) && typeof alias === "string") {
+            this._levelDimensions.set(n, alias);
+          }
+        }
+      }
+
+      // Restore expansion: clear current, set target IDs, then
+      // re-materialize the lazy tree to hydrate the path.
+      this._expanded.clear();
+      const targetIds = new Set(
+        Array.isArray(state.expanded) ? state.expanded : []
+      );
+
+      if (this._lazyTree) {
+        // Walk the lazy tree top-down. For each node whose id is in
+        // targetIds, expand it and materialize its children so the
+        // next level can be matched.
+        const visit = node => {
+          if (targetIds.has(node.id)) {
+            this._expanded.add(node.id);
+            this._materializeChildren(node);
+            if (node.children) {
+              node.children.forEach(visit);
+            }
+          }
+        };
+        visit(this._lazyTree);
+      } else {
+        // Static mode: just set the IDs, pruned against actual tree.
+        for (const id of targetIds) {
+          this._expanded.add(id);
+        }
+        this._pruneExpandedToTree();
+      }
+
+      // Restore selection
+      this._selectedNodeId = null;
+      if (state.selectedNodeId) {
+        const node = this._findNodeById(state.selectedNodeId);
+        if (node && node.id !== "__root__" && !node.isOthers) {
+          this._selectedNodeId = node.id;
+          const detail = this._buildSelectionDetail(node);
+          this.dispatchEvent(new CustomEvent("onNodeSelected", { detail }));
+        }
+      }
+
+      this.render();
+    }
+
+    /* ---------- Export ---------- */
+
+    /**
+     * exportPng(options?)
+     *
+     * Renders the current visible tree to a PNG image and triggers a
+     * browser download. The image includes all visible nodes, connectors,
+     * bars, labels, and the background — exactly what the user sees.
+     *
+     * Options (all optional):
+     *   filename:   string (default "decomposition-tree.png")
+     *   scale:      number (default 2 — retina quality)
+     *   background: string (default uses the widget's backgroundColor)
+     */
+    exportPng(options) {
+      const opts = {
+        filename: "decomposition-tree.png",
+        scale: 2,
+        background: this._settings.backgroundColor,
+        ...(options || {})
+      };
+
+      const svgEl = this.shadowRoot.querySelector("svg");
+      if (!svgEl) return;
+
+      // Clone the SVG so we can inline styles without mutating the live DOM.
+      const clone = svgEl.cloneNode(true);
+      const w = svgEl.getAttribute("width");
+      const h = svgEl.getAttribute("height");
+
+      // Inline all computed styles from the shadow DOM stylesheet.
+      // This is necessary because the Canvas renderer can't access
+      // the shadow DOM's <style> block.
+      this._inlineSvgStyles(clone);
+
+      // Add background rect as first child
+      const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      bgRect.setAttribute("width", "100%");
+      bgRect.setAttribute("height", "100%");
+      bgRect.setAttribute("fill", opts.background);
+      clone.insertBefore(bgRect, clone.firstChild);
+
+      // Serialize to data URL
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(clone);
+      const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      const img = new Image();
+      const scale = opts.scale;
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(Number(w) * scale);
+        canvas.height = Math.round(Number(h) * scale);
+        const ctx = canvas.getContext("2d");
+        ctx.scale(scale, scale);
+        ctx.drawImage(img, 0, 0);
+        URL.revokeObjectURL(url);
+
+        canvas.toBlob(pngBlob => {
+          if (!pngBlob) return;
+          const pngUrl = URL.createObjectURL(pngBlob);
+          const a = document.createElement("a");
+          a.href = pngUrl;
+          a.download = opts.filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(pngUrl);
+        }, "image/png");
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    }
+
+    // Walk the live SVG and apply computed styles inline to each
+    // element in the clone. This handles fill, stroke, font-size,
+    // font-weight, opacity, filter, etc.
+    _inlineSvgStyles(clonedSvg) {
+      const liveSvg = this.shadowRoot.querySelector("svg");
+      if (!liveSvg) return;
+
+      const liveAll = liveSvg.querySelectorAll("*");
+      const cloneAll = clonedSvg.querySelectorAll("*");
+
+      // CSS properties that affect SVG rendering
+      const PROPS = [
+        "fill", "stroke", "stroke-width", "stroke-dasharray",
+        "font-family", "font-size", "font-weight", "font-style",
+        "text-anchor", "opacity", "filter", "pointer-events",
+        "letter-spacing", "text-transform", "dominant-baseline",
+        "clip-path"
+      ];
+
+      for (let i = 0; i < liveAll.length && i < cloneAll.length; i++) {
+        const computed = window.getComputedStyle(liveAll[i]);
+        const style = cloneAll[i].style;
+        for (const prop of PROPS) {
+          const val = computed.getPropertyValue(prop);
+          if (val && val !== "none" && val !== "normal" && val !== "") {
+            style.setProperty(prop, val);
+          }
+        }
+      }
+    }
+
+    /**
+     * exportCsv(options?)
+     *
+     * Exports the currently visible tree as a flat CSV file and triggers
+     * a browser download. Each row is a visible node with columns:
+     *   Level, Label, Dimension, Value, Plan, Variance, Variance%,
+     *   % of Parent, % of Total, Rank
+     *
+     * Options (all optional):
+     *   filename:   string (default "decomposition-tree.csv")
+     *   separator:  string (default ",")
+     *   includeHidden: boolean (default false) — if true, also exports
+     *                  non-expanded children by walking the full tree
+     */
+    exportCsv(options) {
+      const opts = {
+        filename: "decomposition-tree.csv",
+        separator: ",",
+        includeHidden: false,
+        ...(options || {})
+      };
+
+      const sep = opts.separator;
+      const rootTree = this._lazyTree ? [this._lazyTree] : this._tree;
+      if (!rootTree.length) return;
+
+      const hasPlan = !!(this._dataset && this._dataset.planAlias);
+
+      // Collect rows by walking the tree
+      const rows = [];
+
+      const visit = (node, level) => {
+        const dimName = this._lazyTree
+          ? this._dimensionDisplayForNode(node) : "";
+        const pctParent = Number.isFinite(node._pctOfParent)
+          ? node._pctOfParent : "";
+        const pctTotal = Number.isFinite(node._pctOfTotal)
+          ? node._pctOfTotal : "";
+
+        rows.push({
+          level,
+          label: node.label || "",
+          dimension: dimName,
+          value: toNumber(node.value),
+          plan: hasPlan ? toNumber(node.valuePlan) : "",
+          variance: hasPlan && node._variance !== null
+            ? toNumber(node._variance) : "",
+          variancePct: hasPlan && Number.isFinite(node._variancePct)
+            ? node._variancePct : "",
+          pctOfParent: pctParent,
+          pctOfTotal: pctTotal,
+          rank: node._rank || "",
+          isOthers: node.isOthers ? "Yes" : ""
+        });
+
+        if (node.children) {
+          const shouldVisitChildren = opts.includeHidden ||
+            this._expanded.has(node.id);
+          if (shouldVisitChildren) {
+            node.children.forEach(c => visit(c, level + 1));
+          }
+        }
+      };
+
+      rootTree.forEach(r => visit(r, 0));
+
+      // Build CSV
+      const headers = [
+        "Level", "Label", "Dimension", "Value"
+      ];
+      if (hasPlan) {
+        headers.push("Plan", "Variance", "Variance %");
+      }
+      headers.push("% of Parent", "% of Total", "Rank", "Is Others");
+
+      const csvEscape = val => {
+        const s = String(val ?? "");
+        if (s.includes(sep) || s.includes('"') || s.includes("\n")) {
+          return '"' + s.replace(/"/g, '""') + '"';
+        }
+        return s;
+      };
+
+      const fmtPct = v =>
+        v === "" ? "" : (Number(v) * 100).toFixed(1) + "%";
+
+      const csvLines = [
+        headers.map(csvEscape).join(sep),
+        ...rows.map(r => {
+          const cols = [
+            r.level,
+            r.label,
+            r.dimension,
+            r.value
+          ];
+          if (hasPlan) {
+            cols.push(r.plan, r.variance, fmtPct(r.variancePct));
+          }
+          cols.push(
+            fmtPct(r.pctOfParent),
+            fmtPct(r.pctOfTotal),
+            r.rank,
+            r.isOthers
+          );
+          return cols.map(csvEscape).join(sep);
+        })
+      ];
+
+      const csvString = csvLines.join("\n");
+      const blob = new Blob(["\uFEFF" + csvString], {
+        type: "text/csv;charset=utf-8"
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = opts.filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
     expandAll() {
       if (this._lazyTree) {
         const visit = node => {
@@ -2001,6 +2418,16 @@
         `
           <div class="viewport">
             ${bannerHtml}
+            <div class="export-toolbar" aria-label="Export options">
+              <button type="button" class="export-btn" data-action="export-png" title="Export as PNG image">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 11l4-5 3 3.5 2-2 3 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.3"/></svg>
+                <span>PNG</span>
+              </button>
+              <button type="button" class="export-btn" data-action="export-csv" title="Export as CSV data">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h8l3 3v11H1V1z" stroke="currentColor" stroke-width="1.3"/><path d="M4 8h8M4 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+                <span>CSV</span>
+              </button>
+            </div>
             <svg width="${width}" height="${renderHeight}" viewBox="0 0 ${width} ${renderHeight}" role="img" aria-label="Decomposition tree">
               ${connectors2}
               ${nodes}
@@ -2231,6 +2658,22 @@
       if (!root) return;
 
       root.addEventListener("click", event => {
+        const exportPngEl = event.target.closest("[data-action='export-png']");
+        if (exportPngEl) {
+          event.preventDefault();
+          event.stopPropagation();
+          this.exportPng();
+          return;
+        }
+
+        const exportCsvEl = event.target.closest("[data-action='export-csv']");
+        if (exportCsvEl) {
+          event.preventDefault();
+          event.stopPropagation();
+          this.exportCsv();
+          return;
+        }
+
         const clearEl = event.target.closest("[data-action='clear-selection']");
         if (clearEl) {
           event.preventDefault();
@@ -2707,6 +3150,44 @@
             font-weight: 600;
           }
           .sb-clear:hover { background: ${hexToRgba(s.focusBorderColor, 0.12)}; }
+
+          /* Export toolbar */
+          .export-toolbar {
+            position: sticky;
+            top: ${this._selectedNodeId ? "36px" : "0"};
+            right: 0;
+            z-index: 7;
+            display: flex;
+            gap: 2px;
+            justify-content: flex-end;
+            padding: 6px 8px 2px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 180ms ease;
+          }
+          .viewport:hover .export-toolbar { opacity: 1; }
+          .export-btn {
+            pointer-events: all;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 8px;
+            border: 1px solid ${s.nodeBorderColor};
+            border-radius: 5px;
+            background: ${s.nodeBackgroundColor};
+            color: ${s.valueLabelColor};
+            font: inherit;
+            font-size: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 1px 3px ${hexToRgba(s.nodeShadowColor, 0.12)};
+            transition: background 120ms ease, color 120ms ease;
+          }
+          .export-btn:hover {
+            background: ${s.backgroundColor};
+            color: ${s.labelColor};
+          }
+          .export-btn svg { flex: 0 0 auto; }
         </style>
       `;
     }
