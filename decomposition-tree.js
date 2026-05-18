@@ -3095,10 +3095,19 @@
                        Math.abs(pt.y - this._dragState.startSvgY);
           if (dist < 4) return;
           this._dragState.moved = true;
+          this._dragState.lastDx = this._dragState.startDx;
+          this._dragState.lastDy = this._dragState.startDy;
         }
 
         this._nodeOffsets.set(this._dragState.nodeId, { dx, dy });
-        this._updateDraggedNode(this._dragState.nodeId, dx, dy);
+        this._updateDraggedNode(
+          this._dragState.nodeId,
+          dx, dy,
+          dx - this._dragState.lastDx,
+          dy - this._dragState.lastDy
+        );
+        this._dragState.lastDx = dx;
+        this._dragState.lastDy = dy;
       });
 
       svg.addEventListener("pointerup", e => {
@@ -3108,7 +3117,14 @@
         svg.releasePointerCapture(e.pointerId);
 
         if (wasDrag) {
-          // Full re-render to update connectors and cache
+          // Clear live positions from cache before re-render
+          if (this._cachedPositioned) {
+            for (const n of this._cachedPositioned) {
+              delete n._liveX;
+              delete n._liveY;
+            }
+          }
+          // Full re-render to sync everything
           this.render();
         }
       });
@@ -3135,35 +3151,79 @@
       return { x, y };
     }
 
-    // Live-update a single dragged node without full re-render.
-    // The node's position in the last render was (_defaultX + old_offset, _defaultY + old_offset).
-    // Now the offset has changed, so we apply a transform for the DELTA between the
-    // current offset and the offset that was baked into the last render.
-    _updateDraggedNode(nodeId, dx, dy) {
-      const nodeEl = this.shadowRoot.querySelector(
-        `.dt-node[data-node-id="${nodeId.replace(/"/g, '\\"')}"]`
-      );
-      if (!nodeEl) return;
-
+    // Live-update a dragged node by directly repositioning all its
+    // SVG child elements. Uses incremental deltas (incrDx, incrDy) to
+    // shift attributes by the amount moved since last frame — avoiding
+    // the <g transform> approach which creates ghost bounding boxes.
+    _updateDraggedNode(nodeId, dx, dy, incrDx, incrDy) {
       const cached = this._cachedPositioned;
       if (!cached) return;
       const nodeData = cached.find(n => n.id === nodeId);
       if (!nodeData) return;
 
-      // The rendered position was nodeData.x, nodeData.y (which includes the
-      // offset from the last render). The new desired position is _defaultX + dx.
-      // The transform delta is the difference.
-      const renderDx = (nodeData._defaultX + dx) - nodeData.x;
-      const renderDy = (nodeData._defaultY + dy) - nodeData.y;
+      // Hide hover tooltip while dragging
+      this._hideHoverNow();
 
-      nodeEl.setAttribute("transform", `translate(${renderDx},${renderDy})`);
+      const nodeEl = this.shadowRoot.querySelector(
+        `.dt-node[data-node-id="${nodeId.replace(/"/g, '\\"')}"]`
+      );
+      if (!nodeEl) return;
 
-      // Update ALL connector paths to reflect current offsets
+      // Shift every positioned element inside the node <g> by
+      // the incremental amount since last frame.
+      this._shiftSvgChildren(nodeEl, incrDx, incrDy);
+
+      // Store the absolute live position for connector calculation
+      nodeData._liveX = nodeData._defaultX + dx;
+      nodeData._liveY = nodeData._defaultY + dy;
+
+      // Update ALL connector paths
       this._updateAllConnectors();
     }
 
-    // Redraw all connector paths using current _nodeOffsets.
-    // Called during live drag to keep connectors attached.
+    // Recursively shift all x/y attributes inside an SVG <g> by dx/dy.
+    _shiftSvgChildren(g, dx, dy) {
+      for (const child of g.children) {
+        if (child.tagName === "g" || child.tagName === "G") {
+          this._shiftSvgChildren(child, dx, dy);
+          continue;
+        }
+        // Skip <defs>/<clipPath> — they use absolute coords that
+        // define the clip region and must stay in sync with the node.
+        if (child.tagName === "defs" || child.tagName === "DEFS") {
+          this._shiftSvgChildren(child, dx, dy);
+          continue;
+        }
+        if (child.tagName === "clipPath" || child.tagName === "CLIPPATH") {
+          this._shiftSvgChildren(child, dx, dy);
+          continue;
+        }
+
+        // Shift attributes that exist on this element
+        this._shiftAttr(child, "x", dx);
+        this._shiftAttr(child, "y", dy);
+        this._shiftAttr(child, "cx", dx);
+        this._shiftAttr(child, "cy", dy);
+        this._shiftAttr(child, "x1", dx);
+        this._shiftAttr(child, "x2", dx);
+        this._shiftAttr(child, "y1", dy);
+        this._shiftAttr(child, "y2", dy);
+      }
+    }
+
+    _shiftAttr(el, attr, delta) {
+      const val = el.getAttribute(attr);
+      if (val !== null && val !== "") {
+        const num = parseFloat(val);
+        if (Number.isFinite(num)) {
+          el.setAttribute(attr, num + delta);
+        }
+      }
+    }
+
+    // Redraw all connector paths using current positions.
+    // During drag, nodes have _liveX/_liveY set by _updateDraggedNode.
+    // For non-dragging nodes, use _defaultX/_defaultY + offset.
     _updateAllConnectors() {
       const cached = this._cachedPositioned;
       if (!cached) return;
@@ -3174,8 +3234,11 @@
       const byIndex = new Map(cached.map(n => [n.visibleIndex, n]));
       const connectors = svg.querySelectorAll("path.connector");
 
-      // Get the actual current position of a node (default + current offset)
       const getPos = (n) => {
+        // If this node was live-shifted during this drag frame, use its live position
+        if (n._liveX !== undefined) {
+          return { x: n._liveX, y: n._liveY, w: n.width, h: n.height };
+        }
         const off = this._nodeOffsets.get(n.id) || { dx: 0, dy: 0 };
         return {
           x: n._defaultX + off.dx,
@@ -3337,8 +3400,11 @@
     }
 
     _scheduleHoverShow(nodeId) {
+      // Don't show hover tooltip while dragging
+      if (this._dragState) return;
       this._clearHoverTimers();
       this._hoverShowTimer = setTimeout(() => {
+        if (this._dragState) return;  // recheck after timeout
         this._showHoverNow(nodeId);
       }, 250);
     }
