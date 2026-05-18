@@ -2456,7 +2456,8 @@
           return `<path class="connector" d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" />`;
         })
         .join("");
-      const renderHeight = Math.max(240, 40 + renderNodes.length * (s.nodeHeight + s.siblingGap));
+      const renderMaxY = Math.max(240, ...renderNodes.map(n => n.y + n.height + 20));
+      const renderHeight = Math.max(240, 40 + renderNodes.length * (s.nodeHeight + s.siblingGap), renderMaxY);
 
       // Cache renderNodes (post-CF-filter) for live drag and hover.
       this._cachedPositioned = renderNodes;
