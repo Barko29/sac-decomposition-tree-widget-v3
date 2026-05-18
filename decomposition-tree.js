@@ -3049,15 +3049,10 @@
       const svg = this.shadowRoot.querySelector(".dt-main-svg");
       if (!svg) return;
 
-      // Use pointer events for unified mouse+touch handling
       svg.addEventListener("pointerdown", e => {
-        // Only left button
         if (e.button !== 0) return;
-
         const nodeEl = e.target.closest(".dt-node");
         if (!nodeEl) return;
-
-        // Don't drag if clicking on toggle or change-dim buttons
         if (e.target.closest("[data-action='toggle']") ||
             e.target.closest("[data-action='change-dim']")) return;
 
@@ -3065,7 +3060,6 @@
         if (!nodeId) return;
 
         const off = this._nodeOffsets.get(nodeId) || { dx: 0, dy: 0 };
-        // Convert screen coords to SVG coords accounting for zoom
         const pt = this._screenToSvg(e.clientX, e.clientY);
 
         this._dragState = {
@@ -3077,7 +3071,6 @@
           moved: false
         };
 
-        nodeEl.style.cursor = "grabbing";
         svg.setPointerCapture(e.pointerId);
         e.preventDefault();
       });
@@ -3089,25 +3082,28 @@
         const dx = this._dragState.startDx + (pt.x - this._dragState.startSvgX);
         const dy = this._dragState.startDy + (pt.y - this._dragState.startSvgY);
 
-        // Only start dragging after a small threshold to avoid accidental drags
         if (!this._dragState.moved) {
           const dist = Math.abs(pt.x - this._dragState.startSvgX) +
                        Math.abs(pt.y - this._dragState.startSvgY);
           if (dist < 4) return;
           this._dragState.moved = true;
-          this._dragState.lastDx = this._dragState.startDx;
-          this._dragState.lastDy = this._dragState.startDy;
+          this._hideHoverNow();
+          this._clearHoverTimers();
         }
 
         this._nodeOffsets.set(this._dragState.nodeId, { dx, dy });
-        this._updateDraggedNode(
-          this._dragState.nodeId,
-          dx, dy,
-          dx - this._dragState.lastDx,
-          dy - this._dragState.lastDy
-        );
-        this._dragState.lastDx = dx;
-        this._dragState.lastDy = dy;
+
+        // Full re-render on each animation frame. This is the simplest
+        // correct approach: no ghost bounding boxes, no attribute shifting,
+        // no stale positions, and the SVG viewBox automatically expands
+        // to fit dragged nodes at their new positions.
+        if (!this._dragRafPending) {
+          this._dragRafPending = true;
+          requestAnimationFrame(() => {
+            this._dragRafPending = false;
+            if (this._dragState) this.render();
+          });
+        }
       });
 
       svg.addEventListener("pointerup", e => {
@@ -3115,22 +3111,10 @@
         const wasDrag = this._dragState.moved;
         this._dragState = null;
         svg.releasePointerCapture(e.pointerId);
-
-        if (wasDrag) {
-          // Clear live positions from cache before re-render
-          if (this._cachedPositioned) {
-            for (const n of this._cachedPositioned) {
-              delete n._liveX;
-              delete n._liveY;
-            }
-          }
-          // Full re-render to sync everything
-          this.render();
-        }
+        if (wasDrag) this.render();
       });
     }
 
-    // Convert screen coordinates to SVG coordinate space (accounting for zoom/pan)
     _screenToSvg(clientX, clientY) {
       const svg = this.shadowRoot.querySelector(".dt-main-svg");
       if (!svg) return { x: clientX, y: clientY };
@@ -3140,134 +3124,12 @@
       const scaleX = viewBox.width / rect.width;
       const scaleY = viewBox.height / rect.height;
 
-      // Screen → SVG viewBox coords
       let x = (clientX - rect.left) * scaleX;
       let y = (clientY - rect.top) * scaleY;
-
-      // Undo the zoom/pan transform
       x = (x - this._panX) / this._zoom;
       y = (y - this._panY) / this._zoom;
 
       return { x, y };
-    }
-
-    // Live-update a dragged node by directly repositioning all its
-    // SVG child elements. Uses incremental deltas (incrDx, incrDy) to
-    // shift attributes by the amount moved since last frame — avoiding
-    // the <g transform> approach which creates ghost bounding boxes.
-    _updateDraggedNode(nodeId, dx, dy, incrDx, incrDy) {
-      const cached = this._cachedPositioned;
-      if (!cached) return;
-      const nodeData = cached.find(n => n.id === nodeId);
-      if (!nodeData) return;
-
-      // Hide hover tooltip while dragging
-      this._hideHoverNow();
-
-      const nodeEl = this.shadowRoot.querySelector(
-        `.dt-node[data-node-id="${nodeId.replace(/"/g, '\\"')}"]`
-      );
-      if (!nodeEl) return;
-
-      // Shift every positioned element inside the node <g> by
-      // the incremental amount since last frame.
-      this._shiftSvgChildren(nodeEl, incrDx, incrDy);
-
-      // Store the absolute live position for connector calculation
-      nodeData._liveX = nodeData._defaultX + dx;
-      nodeData._liveY = nodeData._defaultY + dy;
-
-      // Update ALL connector paths
-      this._updateAllConnectors();
-    }
-
-    // Recursively shift all x/y attributes inside an SVG <g> by dx/dy.
-    _shiftSvgChildren(g, dx, dy) {
-      for (const child of g.children) {
-        if (child.tagName === "g" || child.tagName === "G") {
-          this._shiftSvgChildren(child, dx, dy);
-          continue;
-        }
-        // Skip <defs>/<clipPath> — they use absolute coords that
-        // define the clip region and must stay in sync with the node.
-        if (child.tagName === "defs" || child.tagName === "DEFS") {
-          this._shiftSvgChildren(child, dx, dy);
-          continue;
-        }
-        if (child.tagName === "clipPath" || child.tagName === "CLIPPATH") {
-          this._shiftSvgChildren(child, dx, dy);
-          continue;
-        }
-
-        // Shift attributes that exist on this element
-        this._shiftAttr(child, "x", dx);
-        this._shiftAttr(child, "y", dy);
-        this._shiftAttr(child, "cx", dx);
-        this._shiftAttr(child, "cy", dy);
-        this._shiftAttr(child, "x1", dx);
-        this._shiftAttr(child, "x2", dx);
-        this._shiftAttr(child, "y1", dy);
-        this._shiftAttr(child, "y2", dy);
-      }
-    }
-
-    _shiftAttr(el, attr, delta) {
-      const val = el.getAttribute(attr);
-      if (val !== null && val !== "") {
-        const num = parseFloat(val);
-        if (Number.isFinite(num)) {
-          el.setAttribute(attr, num + delta);
-        }
-      }
-    }
-
-    // Redraw all connector paths using current positions.
-    // During drag, nodes have _liveX/_liveY set by _updateDraggedNode.
-    // For non-dragging nodes, use _defaultX/_defaultY + offset.
-    _updateAllConnectors() {
-      const cached = this._cachedPositioned;
-      if (!cached) return;
-
-      const svg = this.shadowRoot.querySelector(".dt-zoom-group");
-      if (!svg) return;
-
-      const byIndex = new Map(cached.map(n => [n.visibleIndex, n]));
-      const connectors = svg.querySelectorAll("path.connector");
-
-      const getPos = (n) => {
-        // If this node was live-shifted during this drag frame, use its live position
-        if (n._liveX !== undefined) {
-          return { x: n._liveX, y: n._liveY, w: n.width, h: n.height };
-        }
-        const off = this._nodeOffsets.get(n.id) || { dx: 0, dy: 0 };
-        return {
-          x: n._defaultX + off.dx,
-          y: n._defaultY + off.dy,
-          w: n.width,
-          h: n.height
-        };
-      };
-
-      let connIdx = 0;
-      for (const n of cached) {
-        if (n.parentVisibleIndex === null || !byIndex.has(n.parentVisibleIndex)) continue;
-        const p = byIndex.get(n.parentVisibleIndex);
-        const pPos = getPos(p);
-        const nPos = getPos(n);
-
-        const x1 = pPos.x + pPos.w;
-        const y1 = pPos.y + pPos.h / 2;
-        const x2 = nPos.x;
-        const y2 = nPos.y + nPos.h / 2;
-        const mid = (x1 + x2) / 2;
-
-        if (connectors[connIdx]) {
-          connectors[connIdx].setAttribute("d",
-            `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`
-          );
-        }
-        connIdx++;
-      }
     }
 
     _wireZoomPanEvents() {
