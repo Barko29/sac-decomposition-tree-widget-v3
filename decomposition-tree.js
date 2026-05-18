@@ -2378,8 +2378,7 @@
         maxY
       );
 
-      // Cache for hover card reuse (avoids recomputing on every mouseenter).
-      this._cachedPositioned = positioned;
+      // Cache for hover card reuse — set after CF filter below.
       this._cachedWidth = width;
 
       const byIndex = new Map(positioned.map(n => [n.visibleIndex, n]));
@@ -2436,7 +2435,9 @@
             parentVisibleIndex: n.parentVisibleIndex !== null
               ? (oldToNew.get(n.parentVisibleIndex) ?? null)
               : null,
-            y: 20 + newIdx * (s.nodeHeight + s.siblingGap)
+            _defaultY: 20 + newIdx * (s.nodeHeight + s.siblingGap),
+            y: 20 + newIdx * (s.nodeHeight + s.siblingGap) +
+               ((this._nodeOffsets.get(n.id) || {}).dy || 0)
           }));
         }
       }
@@ -2456,6 +2457,9 @@
         })
         .join("");
       const renderHeight = Math.max(240, 40 + renderNodes.length * (s.nodeHeight + s.siblingGap));
+
+      // Cache renderNodes (post-CF-filter) for live drag and hover.
+      this._cachedPositioned = renderNodes;
 
       const nodes = renderNodes
         .map(node => {
@@ -3131,46 +3135,46 @@
       return { x, y };
     }
 
-    // Live-update a single dragged node without full re-render
+    // Live-update a single dragged node without full re-render.
+    // The node's position in the last render was (_defaultX + old_offset, _defaultY + old_offset).
+    // Now the offset has changed, so we apply a transform for the DELTA between the
+    // current offset and the offset that was baked into the last render.
     _updateDraggedNode(nodeId, dx, dy) {
       const nodeEl = this.shadowRoot.querySelector(
         `.dt-node[data-node-id="${nodeId.replace(/"/g, '\\"')}"]`
       );
       if (!nodeEl) return;
 
-      // Find the node's default position from cache
       const cached = this._cachedPositioned;
       if (!cached) return;
       const nodeData = cached.find(n => n.id === nodeId);
       if (!nodeData) return;
 
-      const newX = nodeData._defaultX + dx;
-      const newY = nodeData._defaultY + dy;
-      const s = this._settings;
-      const padL = Math.max(0, toNumber(s.paddingLeft) || 14);
+      // The rendered position was nodeData.x, nodeData.y (which includes the
+      // offset from the last render). The new desired position is _defaultX + dx.
+      // The transform delta is the difference.
+      const renderDx = (nodeData._defaultX + dx) - nodeData.x;
+      const renderDy = (nodeData._defaultY + dy) - nodeData.y;
 
-      // Move the entire <g> via transform
-      nodeEl.setAttribute("transform", `translate(${dx},${dy})`);
+      nodeEl.setAttribute("transform", `translate(${renderDx},${renderDy})`);
 
-      // Update connectors that touch this node (parent→this, this→children)
-      this._updateConnectors(nodeId, newX, newY);
+      // Update ALL connector paths to reflect current offsets
+      this._updateAllConnectors();
     }
 
-    // Redraw connectors touching a specific node during drag
-    _updateConnectors(nodeId, newX, newY) {
+    // Redraw all connector paths using current _nodeOffsets.
+    // Called during live drag to keep connectors attached.
+    _updateAllConnectors() {
       const cached = this._cachedPositioned;
       if (!cached) return;
-      const nodeData = cached.find(n => n.id === nodeId);
-      if (!nodeData) return;
 
       const svg = this.shadowRoot.querySelector(".dt-zoom-group");
       if (!svg) return;
 
-      // Rebuild all connectors (simple approach — works because connector
-      // count is small relative to drag frame rate)
       const byIndex = new Map(cached.map(n => [n.visibleIndex, n]));
+      const connectors = svg.querySelectorAll("path.connector");
 
-      // Recompute positions with current offsets
+      // Get the actual current position of a node (default + current offset)
       const getPos = (n) => {
         const off = this._nodeOffsets.get(n.id) || { dx: 0, dy: 0 };
         return {
@@ -3181,9 +3185,7 @@
         };
       };
 
-      const connectors = svg.querySelectorAll("path.connector");
       let connIdx = 0;
-
       for (const n of cached) {
         if (n.parentVisibleIndex === null || !byIndex.has(n.parentVisibleIndex)) continue;
         const p = byIndex.get(n.parentVisibleIndex);
