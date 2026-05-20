@@ -1,8 +1,8 @@
 {
   "id": "com.company.sac.decompositiontree.v3",
-  "version": "0.9.5",
+  "version": "1.0.0",
   "name": "Decomposition Tree",
-  "description": "Expandable left-to-right decomposition tree with synthetic Total root, drill-by-dimension picker, optional two-measure comparison with variance bars, Top-N + Others rollup, story-level selection events, theme presets, density modes, conditional formatting, and full theming control.",
+  "description": "Expandable left-to-right decomposition tree with synthetic Total root, drill-by-dimension picker, optional two-measure comparison with variance bars, Top-N + Others rollup, story-level selection events, theme presets, density modes, conditional formatting, WCAG 2.1 AA accessibility, RTL support, i18n, and full theming control.",
   "newInstancePrefix": "DecompositionTree",
   "icon": "https://barko29.github.io/sac-decomposition-tree-widget-v3/icon.svg",
   "webcomponents": [
@@ -16,6 +16,13 @@
     {
       "kind": "styling",
       "tag": "com-company-decomposition-tree-v3-styling",
+      "url": "https://barko29.github.io/sac-decomposition-tree-widget-v3/decomposition-tree.js",
+      "integrity": "",
+      "ignoreIntegrity": true
+    },
+    {
+      "kind": "builder",
+      "tag": "com-company-decomposition-tree-v3-builder",
       "url": "https://barko29.github.io/sac-decomposition-tree-widget-v3/decomposition-tree.js",
       "integrity": "",
       "ignoreIntegrity": true
@@ -94,7 +101,9 @@
     "showExportPng": { "type": "boolean", "default": true },
     "showExportCsv": { "type": "boolean", "default": true },
     "enableNodeDrag": { "type": "boolean", "default": true },
-    "enableZoomPan": { "type": "boolean", "default": true }
+    "enableZoomPan": { "type": "boolean", "default": true },
+    "direction": { "type": "string", "default": "ltr" },
+    "strings": { "type": "string", "default": "{}" }
   },
   "methods": {
     "expandAll": { "description": "Expands all nodes." },
