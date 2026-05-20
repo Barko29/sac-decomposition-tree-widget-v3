@@ -50,6 +50,9 @@
     enableNodeDrag: true,
     enableZoomPan: true,
 
+    // Layout direction: "ltr" (default, root on left) or "rtl" (root on right)
+    direction: "ltr",
+
     // Cosmetic colors
     backgroundColor: "#f8fafc",
     nodeBackgroundColor: "#ffffff",
@@ -64,6 +67,45 @@
     toggleBackgroundColor: "#f8fafc",
     toggleBorderColor: "#94a3b8",
     toggleTextColor: "#334155"
+  };
+
+  /* ---------- i18n: externalised UI strings ---------- */
+
+  const DEFAULT_STRINGS = {
+    total: "Total",
+    others: "Others",
+    drillBy: "Drill by…",
+    changeDimension: "Change dimension at this level",
+    filteringBy: "Filtering by",
+    clearSelection: "Clear selection",
+    tooManyNodes: "Too many nodes to display",
+    collapseHint: "Collapse levels, reduce Top-N, or apply filters.",
+    exportPng: "PNG",
+    exportCsv: "CSV",
+    resetLayout: "Reset",
+    zoomIn: "Zoom in",
+    zoomOut: "Zoom out",
+    fitToView: "Fit to view",
+    resetPositionsZoom: "Reset positions & zoom",
+    exportAsPng: "Export as PNG image",
+    exportAsCsv: "Export as CSV data",
+    toolbar: "Toolbar",
+    value: "Value",
+    plan: "Plan",
+    variance: "Variance",
+    variancePct: "Variance %",
+    pctOfParent: "% of parent",
+    pctOfTotal: "% of total",
+    rank: "Rank",
+    hiddenMembers: "Hidden members",
+    dimension: "Dimension",
+    level: "Level",
+    label: "Label",
+    isOthers: "Is Others",
+    yes: "Yes",
+    expanded: "expanded",
+    collapsed: "collapsed",
+    renderError: "An error occurred while rendering the tree. Try refreshing the page or adjusting your data/settings."
   };
 
   /* ---------- Theme presets ---------- */
@@ -357,42 +399,46 @@
       .replaceAll("'", "&apos;");
   }
 
-  function formatNumber(value) {
-    if (value === null || value === undefined) return "—";
-    return new Intl.NumberFormat(undefined, {
-      maximumFractionDigits: 1
-    }).format(toNumber(value));
-  }
+  // Cached Intl.NumberFormat instances — construction is ~10x more expensive
+  // than formatting. With 500 nodes × 3 format calls each, caching saves
+  // ~1,500 constructor invocations per render.
+  const _fmtNumber = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+  const _fmtPercentCache = new Map(); // key: decimals -> formatter
 
-  function formatPercent(fraction, decimals) {
+  function _getFmtPercent(decimals) {
     const d = Math.max(0, Math.min(4, Number.isFinite(decimals) ? decimals : 1));
-    if (!Number.isFinite(fraction)) return "—";
-    return new Intl.NumberFormat(undefined, {
+    if (_fmtPercentCache.has(d)) return _fmtPercentCache.get(d);
+    const fmt = new Intl.NumberFormat(undefined, {
       style: "percent",
       minimumFractionDigits: d,
       maximumFractionDigits: d
-    }).format(fraction);
+    });
+    _fmtPercentCache.set(d, fmt);
+    return fmt;
+  }
+
+  function formatNumber(value) {
+    if (value === null || value === undefined) return "—";
+    return _fmtNumber.format(toNumber(value));
+  }
+
+  function formatPercent(fraction, decimals) {
+    if (!Number.isFinite(fraction)) return "—";
+    return _getFmtPercent(decimals).format(fraction);
   }
 
   function formatSignedNumber(value) {
     if (!Number.isFinite(value)) return "—";
     const v = Math.abs(value);
     const sign = value > 0 ? "+" : value < 0 ? "−" : "";
-    return sign + new Intl.NumberFormat(undefined, {
-      maximumFractionDigits: 1
-    }).format(v);
+    return sign + _fmtNumber.format(v);
   }
 
   function formatSignedPercent(fraction, decimals) {
     if (!Number.isFinite(fraction)) return "—";
-    const d = Math.max(0, Math.min(4, Number.isFinite(decimals) ? decimals : 1));
     const v = Math.abs(fraction);
     const sign = fraction > 0 ? "+" : fraction < 0 ? "−" : "";
-    return sign + new Intl.NumberFormat(undefined, {
-      style: "percent",
-      minimumFractionDigits: d,
-      maximumFractionDigits: d
-    }).format(v);
+    return sign + _getFmtPercent(decimals).format(v);
   }
 
   function hexToRgba(hex, alpha) {
@@ -407,6 +453,15 @@
       r = parseInt(s.slice(0, 2), 16);
       g = parseInt(s.slice(2, 4), 16);
       b = parseInt(s.slice(4, 6), 16);
+    } else if (s.length === 8) {
+      // #RRGGBBAA — extract RGB and use the embedded alpha (override param)
+      r = parseInt(s.slice(0, 2), 16);
+      g = parseInt(s.slice(2, 4), 16);
+      b = parseInt(s.slice(4, 6), 16);
+      const a = parseInt(s.slice(6, 8), 16);
+      if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b) && Number.isFinite(a)) {
+        return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
+      }
     } else {
       return hex;
     }
@@ -679,6 +734,65 @@
     return { dimensions, measureAlias, planAlias, measureName, planName, rows };
   }
 
+  /* ---------- Row index for O(matchingRows) aggregation ---------- */
+
+  // Builds a multi-dimensional index: Map<alias, Map<label, Set<rowIndex>>>
+  // Allows aggregateByDimension and sumFiltered* to skip non-matching rows.
+  function buildRowIndex(dataset) {
+    if (!dataset || !dataset.rows.length) return null;
+    const index = new Map(); // alias -> Map<label, Set<rowIndex>>
+    for (const dim of dataset.dimensions) {
+      index.set(dim.alias, new Map());
+    }
+    for (let i = 0; i < dataset.rows.length; i++) {
+      const row = dataset.rows[i];
+      for (const dim of dataset.dimensions) {
+        const cell = row.cells[dim.alias];
+        if (!cell || cell.label === "") continue;
+        const labelMap = index.get(dim.alias);
+        if (!labelMap.has(cell.label)) {
+          labelMap.set(cell.label, new Set());
+        }
+        labelMap.get(cell.label).add(i);
+      }
+    }
+    return index;
+  }
+
+  // Returns the set of row indices that match ALL filter constraints.
+  // Uses index intersection for O(min matching set) performance.
+  function getMatchingRowIndices(rowIndex, filters, totalRowCount) {
+    if (!filters.length) return null; // null = all rows match
+    if (!rowIndex) return null;
+
+    let candidates = null;
+    for (const f of filters) {
+      const labelMap = rowIndex.get(f.alias);
+      if (!labelMap) return new Set(); // dimension not in index
+      const matching = labelMap.get(f.label);
+      if (!matching || !matching.size) return new Set(); // no rows match
+
+      if (candidates === null) {
+        candidates = new Set(matching);
+      } else {
+        // Intersect: iterate the smaller set
+        if (candidates.size <= matching.size) {
+          for (const idx of candidates) {
+            if (!matching.has(idx)) candidates.delete(idx);
+          }
+        } else {
+          const newCandidates = new Set();
+          for (const idx of matching) {
+            if (candidates.has(idx)) newCandidates.add(idx);
+          }
+          candidates = newCandidates;
+        }
+      }
+      if (candidates.size === 0) return candidates;
+    }
+    return candidates;
+  }
+
   // Aggregate dataset rows filtered by an arbitrary set of dimension
   // constraints, grouped by a chosen dimension. Returns a sorted array
   // of bucket entries: { id, label, value }.
@@ -688,22 +802,36 @@
   //   groupBy:     alias of the dimension to bucket by
   //   settings:    for topN / sortDescending / enableOthers / othersLabel
   //   parentId:    id of the parent node (for unique Others id)
-  function aggregateByDimension(dataset, filters, groupBy, settings, parentId) {
+  function aggregateByDimension(dataset, filters, groupBy, settings, parentId, rowIndex) {
     if (!dataset) return [];
 
     const buckets = new Map(); // label -> { id, label, value }
 
-    for (const row of dataset.rows) {
-      // Apply filters: every constraint must match this row.
-      let ok = true;
-      for (const f of filters) {
-        const cell = row.cells[f.alias];
-        if (!cell || cell.label !== f.label) {
-          ok = false;
-          break;
+    // Use index if available: get candidate row indices from filter constraints
+    const candidates = rowIndex
+      ? getMatchingRowIndices(rowIndex, filters, dataset.rows.length)
+      : null;
+
+    // Iterate only matching rows (or all rows if no index / no filters)
+    const iterateRows = candidates !== null
+      ? candidates
+      : { [Symbol.iterator]: function* () { for (let i = 0; i < dataset.rows.length; i++) yield i; } };
+
+    for (const rowIdx of iterateRows) {
+      const row = dataset.rows[rowIdx];
+
+      // If we didn't use the index (candidates === null), apply filters manually
+      if (candidates === null) {
+        let ok = true;
+        for (const f of filters) {
+          const cell = row.cells[f.alias];
+          if (!cell || cell.label !== f.label) {
+            ok = false;
+            break;
+          }
         }
+        if (!ok) continue;
       }
-      if (!ok) continue;
 
       const cell = row.cells[groupBy];
       if (!cell || cell.label === "") continue;
@@ -752,36 +880,56 @@
 
   // Sum the dataset for a given filter set — used to value the root and
   // any node whose value isn't already known.
-  function sumFilteredValue(dataset, filters) {
+  function sumFilteredValue(dataset, filters, rowIndex) {
     if (!dataset) return 0;
+    const candidates = rowIndex
+      ? getMatchingRowIndices(rowIndex, filters, dataset.rows.length)
+      : null;
+
     let total = 0;
-    for (const row of dataset.rows) {
-      let ok = true;
-      for (const f of filters) {
-        const cell = row.cells[f.alias];
-        if (!cell || cell.label !== f.label) {
-          ok = false;
-          break;
-        }
+    if (candidates !== null) {
+      for (const idx of candidates) {
+        total += toNumber(dataset.rows[idx].value);
       }
-      if (ok) total += toNumber(row.value);
+    } else {
+      for (const row of dataset.rows) {
+        let ok = true;
+        for (const f of filters) {
+          const cell = row.cells[f.alias];
+          if (!cell || cell.label !== f.label) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) total += toNumber(row.value);
+      }
     }
     return total;
   }
 
-  function sumFilteredValuePlan(dataset, filters) {
+  function sumFilteredValuePlan(dataset, filters, rowIndex) {
     if (!dataset || !dataset.planAlias) return 0;
+    const candidates = rowIndex
+      ? getMatchingRowIndices(rowIndex, filters, dataset.rows.length)
+      : null;
+
     let total = 0;
-    for (const row of dataset.rows) {
-      let ok = true;
-      for (const f of filters) {
-        const cell = row.cells[f.alias];
-        if (!cell || cell.label !== f.label) {
-          ok = false;
-          break;
-        }
+    if (candidates !== null) {
+      for (const idx of candidates) {
+        total += toNumber(dataset.rows[idx].valuePlan);
       }
-      if (ok) total += toNumber(row.valuePlan);
+    } else {
+      for (const row of dataset.rows) {
+        let ok = true;
+        for (const f of filters) {
+          const cell = row.cells[f.alias];
+          if (!cell || cell.label !== f.label) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) total += toNumber(row.valuePlan);
+      }
     }
     return total;
   }
@@ -897,6 +1045,9 @@
 
       this._settings = { ...DEFAULT_SETTINGS };
 
+      // i18n: user-provided string overrides (merged with DEFAULT_STRINGS)
+      this._strings = { ...DEFAULT_STRINGS };
+
       // Two data modes:
       //   1) Modern: dataset + lazy tree (this._dataset, this._lazyTree)
       //   2) Legacy: pre-built static tree from setData() scripting calls
@@ -909,6 +1060,14 @@
 
       this._expanded = new Set();
       this._hasInitialized = false;
+
+      // O(1) node lookup index: Map<nodeId, node>.
+      // Updated in _buildLazyRoot, _materializeChildren, rebuildAfterStructuralChange.
+      this._nodeIndex = new Map();
+
+      // O(1) level-in-use tracking: Map<level, count>.
+      // Incremented/decremented when nodes are expanded/collapsed.
+      this._expandedByLevel = new Map();
 
       // Sticky-per-level dimension choices.
       // Map<level (1-based), aliasString>. Level 1 = first drill below root.
@@ -929,9 +1088,9 @@
       // automatically if the node no longer exists after refresh.
       this._selectedNodeId = null;
 
-      // Cached bound handlers + cleanup tickets so we don't leak listeners.
-      this._docClickHandler = null;
-      this._escHandler = null;
+      // AbortController for global document listeners (picker close).
+      // Ensures cleanup even if onCustomWidgetDestroy isn't called.
+      this._globalAbort = null;
 
       // Parsed conditional formatting rules (computed from JSON string).
       this._cfRules = [];
@@ -950,6 +1109,12 @@
       this._panX = 0;
       this._panY = 0;
       this._panState = null;   // { startMouseX, startMouseY, startPanX, startPanY }
+
+      // Data change detection: skip re-extraction when binding hasn't changed
+      this._lastBindingHash = null;
+
+      // Row index for O(matchingRows) aggregation: Map<alias, Map<label, Set<rowIndex>>>
+      this._rowIndex = null;
     }
 
     _parseCfRules() {
@@ -958,17 +1123,79 @@
         const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
         this._cfRules = Array.isArray(parsed) ? parsed : [];
       } catch (e) {
+        console.warn("DecompositionTree: invalid conditionalFormattingRules JSON — rules disabled", e);
         this._cfRules = [];
       }
     }
 
+    // SAC lifecycle: called once before the first render with initial properties.
+    onCustomWidgetInit() {
+      this._parseCfRules();
+    }
+
     connectedCallback() {
       this._parseCfRules();
+      // Create the style element once — never regenerated per render.
+      // The render method only updates the SVG/overlay content.
+      this._styleEl = document.createElement("style");
+      this.shadowRoot.appendChild(this._styleEl);
+      this._updateStyles();
       this.tryRefreshFromBinding();
       this.render();
     }
 
+    // Update the persistent style element content (not per-render).
+    _updateStyles() {
+      if (this._styleEl) {
+        this._styleEl.textContent = this._buildStyleContent();
+      }
+    }
+
+    // Replace shadow DOM content while preserving the persistent <style> element.
+    // This avoids re-parsing ~325 lines of CSS on every render cycle.
+    _setContentHtml(html) {
+      if (!this.shadowRoot) return;
+      // Remove everything except the style element
+      const children = Array.from(this.shadowRoot.childNodes);
+      for (const child of children) {
+        if (child !== this._styleEl) {
+          this.shadowRoot.removeChild(child);
+        }
+      }
+      // Ensure style element exists (safety for edge cases)
+      if (!this._styleEl || !this._styleEl.parentNode) {
+        this._styleEl = document.createElement("style");
+        this._styleEl.textContent = this._buildStyleContent();
+        this.shadowRoot.appendChild(this._styleEl);
+      }
+      // Insert new content
+      if (html) {
+        const container = document.createElement("div");
+        container.innerHTML = html;
+        while (container.firstChild) {
+          this.shadowRoot.appendChild(container.firstChild);
+        }
+      }
+    }
+
+    // Safety net: if the element is removed from DOM without SAC calling
+    // onCustomWidgetDestroy (e.g. during page navigation), clean up here.
+    disconnectedCallback() {
+      this._clearHoverTimers();
+      if (this._zoomRenderTimer) { clearTimeout(this._zoomRenderTimer); this._zoomRenderTimer = null; }
+      this._teardownGlobalListeners();
+      // Null out large references to help GC
+      this._dataset = null;
+      this._lazyTree = null;
+      this._cachedPositioned = null;
+      this._rowIndex = null;
+      this._nodeIndex.clear();
+      this._expandedByLevel.clear();
+    }
+
     onCustomWidgetBeforeUpdate(changedProperties) {
+      // Invalidate render cache so hover cards don't use stale positions
+      this._cachedPositioned = null;
       // Theme preset: if changed, apply its palette before merging
       if (changedProperties.themePreset &&
           changedProperties.themePreset !== "custom") {
@@ -993,9 +1220,26 @@
         this._parseCfRules();
       }
 
+      // Parse i18n string overrides
+      if (changedProperties.strings !== undefined) {
+        try {
+          const parsed = typeof changedProperties.strings === "string"
+            ? JSON.parse(changedProperties.strings)
+            : changedProperties.strings;
+          if (parsed && typeof parsed === "object") {
+            this._strings = { ...DEFAULT_STRINGS, ...parsed };
+          }
+        } catch (e) {
+          console.warn("DecompositionTree: invalid strings JSON", e);
+        }
+      }
+
       if (hasStructuralChange(changedProperties)) {
         this.rebuildAfterStructuralChange();
       }
+
+      // Refresh style element when any cosmetic property changes
+      this._updateStyles();
     }
 
     onCustomWidgetAfterUpdate() {
@@ -1012,6 +1256,18 @@
       if (this._zoomRenderTimer) { clearTimeout(this._zoomRenderTimer); this._zoomRenderTimer = null; }
       this._teardownGlobalListeners();
       this.shadowRoot.innerHTML = "";
+      // Null out large references to help GC
+      this._dataset = null;
+      this._lazyTree = null;
+      this._cachedPositioned = null;
+      this._rowIndex = null;
+      this._tree = [];
+      this._lastPathRows = [];
+      this._nodeOffsets.clear();
+      this._expanded.clear();
+      this._expandedByLevel.clear();
+      this._nodeIndex.clear();
+      this._levelDimensions.clear();
     }
 
     /* ---------- Data ingest ---------- */
@@ -1020,9 +1276,19 @@
       const binding = this.mainBinding;
       if (!binding) return;
 
+      // Quick fingerprint to skip re-extraction when data hasn't changed.
+      // This prevents unnecessary tree rebuilds on cosmetic property changes
+      // (colors, sizes) that also trigger onCustomWidgetAfterUpdate.
+      const bindingHash = (binding.data ? binding.data.length : 0) +
+        "|" + JSON.stringify(binding.metadata || "");
+      if (bindingHash === this._lastBindingHash) return;
+      this._lastBindingHash = bindingHash;
+
       const dataset = extractBindingDataset(binding);
       if (dataset && dataset.dimensions.length) {
         this._dataset = dataset;
+        // Build the row index for O(matchingRows) aggregation.
+        this._rowIndex = buildRowIndex(dataset);
         // Reset legacy mode if we now have a real binding.
         this._tree = [];
         this._lastPathRows = [];
@@ -1059,6 +1325,7 @@
       }
 
       // Fall back to legacy path-row mode for backward compatibility.
+      console.warn("DecompositionTree: falling back to legacy path-row extraction. This path is deprecated — ensure your data binding uses the modern metadata format.");
       const pathRows = extractPathRowsFromSacBinding(binding);
       if (!pathRows.length) return;
 
@@ -1092,9 +1359,9 @@
     _buildLazyRoot() {
       const s = this._settings;
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
-      const totalValue = sumFilteredValue(this._dataset, []);
-      const totalPlan = hasPlan ? sumFilteredValuePlan(this._dataset, []) : 0;
-      return {
+      const totalValue = sumFilteredValue(this._dataset, [], this._rowIndex);
+      const totalPlan = hasPlan ? sumFilteredValuePlan(this._dataset, [], this._rowIndex) : 0;
+      const root = {
         id: "__root__",
         label: s.rootLabel || "Total",
         level: 0,
@@ -1104,23 +1371,24 @@
         _variancePct: hasPlan && totalPlan !== 0
           ? (totalValue - totalPlan) / Math.abs(totalPlan)
           : null,
-        // Share-of-parent normalization: a node's bar uses its parent's
-        // value (or max of parent value/plan in comparison mode) as
-        // denominator. Root has no parent — normalize against itself.
         _siblingMax: Math.abs(totalValue),
         _siblingMaxCombined: hasPlan
           ? Math.max(Math.abs(totalValue), Math.abs(totalPlan))
           : Math.abs(totalValue),
-        _pctOfParent: 1,                  // root is 100% of itself
+        _pctOfParent: 1,
         _pctOfTotal: 1,
         _rank: 1,
         _siblingCount: 1,
-        filterPath: [],         // ordered [{alias, label}, ...]
-        children: null,         // null = not yet expanded
+        filterPath: [],
+        children: null,
         isOthers: false,
         hiddenChildrenCount: 0,
         hiddenLabels: null
       };
+      // Register in index
+      this._nodeIndex.clear();
+      this._nodeIndex.set(root.id, root);
+      return root;
     }
 
     // Materialize a node's children using the dimension chosen for the
@@ -1149,7 +1417,8 @@
         node.filterPath,
         groupBy,
         this._settings,
-        node.id
+        node.id,
+        this._rowIndex
       );
 
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
@@ -1172,7 +1441,7 @@
       node.children = buckets.map((b, idx) => {
         const v = toNumber(b.value);
         const p = toNumber(b.valuePlan);
-        return {
+        const child = {
           id: this._idForPath([
             ...node.filterPath,
             { alias: groupBy, label: b.label }
@@ -1197,6 +1466,9 @@
           hiddenChildrenCount: b.hiddenChildrenCount || 0,
           hiddenLabels: b.hiddenLabels || null
         };
+        // Register in O(1) index
+        this._nodeIndex.set(child.id, child);
+        return child;
       });
     }
 
@@ -1252,37 +1524,49 @@
 
     // Cached wrapper: avoids repeated tree walks within a single render cycle.
     _isLevelInUseCached(level) {
-      if (!this._levelInUseCache) this._levelInUseCache = new Map();
-      if (this._levelInUseCache.has(level)) return this._levelInUseCache.get(level);
-      const result = this._isLevelInUse(level);
-      this._levelInUseCache.set(level, result);
-      return result;
+      return this._isLevelInUse(level);
     }
 
     // Invalidate the cache at the start of each render/toggle cycle.
     _clearLevelInUseCache() {
-      this._levelInUseCache = null;
+      // No-op: O(1) counter replaces the per-render cache.
     }
 
-    // Check whether any node at (level - 1) is currently expanded,
-    // meaning children at `level` are actually visible in the tree.
+    // O(1) check: are any nodes at (level - 1) currently expanded?
     _isLevelInUse(level) {
       if (level <= 1) return this._expanded.has("__root__");
-      // Walk the lazy tree to find any expanded node at (level - 1).
-      if (!this._lazyTree) return false;
-      let found = false;
-      const visit = node => {
-        if (found) return;
-        if (node.level === level - 1 && this._expanded.has(node.id)) {
-          found = true;
-          return;
+      // Check if any node at level-1 is expanded
+      const count = this._expandedByLevel.get(level - 1) || 0;
+      return count > 0;
+    }
+
+    // Tracked expand/collapse: maintain _expandedByLevel counter.
+    _trackExpand(nodeId, level) {
+      this._expanded.add(nodeId);
+      this._expandedByLevel.set(level, (this._expandedByLevel.get(level) || 0) + 1);
+    }
+
+    _trackCollapse(nodeId, level) {
+      this._expanded.delete(nodeId);
+      const count = this._expandedByLevel.get(level) || 0;
+      if (count > 1) {
+        this._expandedByLevel.set(level, count - 1);
+      } else {
+        this._expandedByLevel.delete(level);
+      }
+    }
+
+    // Rebuild _expandedByLevel from the current _expanded set.
+    // Called after bulk operations (setState, expandAll, collapseAll, etc.)
+    _rebuildExpandedByLevel() {
+      this._expandedByLevel.clear();
+      for (const id of this._expanded) {
+        const node = this._nodeIndex.get(id);
+        const level = node ? node.level : undefined;
+        if (level !== undefined) {
+          this._expandedByLevel.set(level, (this._expandedByLevel.get(level) || 0) + 1);
         }
-        if (node.children && this._expanded.has(node.id)) {
-          node.children.forEach(visit);
-        }
-      };
-      visit(this._lazyTree);
-      return found;
+      }
     }
 
     // Stable, deterministic node id from filter path. Order matters.
@@ -1346,6 +1630,11 @@
     }
 
     _findNodeById(nodeId) {
+      // O(1) lookup via maintained index.
+      if (this._nodeIndex.has(nodeId)) {
+        return this._nodeIndex.get(nodeId);
+      }
+      // Fallback: DFS if index misses (shouldn't happen in normal flow).
       if (this._lazyTree) {
         let found = null;
         const visit = node => {
@@ -1357,6 +1646,7 @@
           if (node.children) node.children.forEach(visit);
         };
         visit(this._lazyTree);
+        if (found) this._nodeIndex.set(found.id, found);
         return found;
       }
       // Legacy mode
@@ -1370,6 +1660,7 @@
         if (node.children) node.children.forEach(visit);
       };
       this._tree.forEach(visit);
+      if (found) this._nodeIndex.set(found.id, found);
       return found;
     }
 
@@ -1416,6 +1707,8 @@
       if (!Array.isArray(labels) || !labels.length) {
         return { ok: false, depth: 0, nodeId: null };
       }
+      // Coerce all labels to strings for safety
+      const safeLabels = labels.map(l => String(l ?? ""));
       const opts = { select: true, scroll: true, ...(options || {}) };
 
       // Always start from root
@@ -1434,8 +1727,8 @@
       let matchedDepth = 0;
       let lastMatchedNode = current;
 
-      for (let i = 0; i < labels.length; i++) {
-        const targetLabel = String(labels[i]);
+      for (let i = 0; i < safeLabels.length; i++) {
+        const targetLabel = safeLabels[i];
 
         if (!current.children || !current.children.length) break;
 
@@ -1456,7 +1749,7 @@
         current = child;
       }
 
-      const ok = matchedDepth === labels.length;
+      const ok = matchedDepth === safeLabels.length;
 
       // Optionally select the deepest matched node
       if (opts.select && lastMatchedNode && lastMatchedNode.id !== "__root__") {
@@ -1474,7 +1767,7 @@
           const targetId = lastMatchedNode.id;
           raf(() => {
             const el = this.shadowRoot.querySelector(
-              `[data-node-id="${targetId.replace(/["\\]/g, '\\$&')}"]`
+              `[data-node-id="${this._escapeCssSelector(targetId)}"]`
             );
             if (el && typeof el.scrollIntoView === "function") {
               el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
@@ -1539,8 +1832,10 @@
       // Restore expansion: clear current, set target IDs, then
       // re-materialize the lazy tree to hydrate the path.
       this._expanded.clear();
+      // Validate: expanded must be an array of strings
+      const rawExpanded = Array.isArray(state.expanded) ? state.expanded : [];
       const targetIds = new Set(
-        Array.isArray(state.expanded) ? state.expanded : []
+        rawExpanded.filter(id => typeof id === "string")
       );
 
       if (this._lazyTree) {
@@ -1576,6 +1871,7 @@
         }
       }
 
+      this._rebuildExpandedByLevel();
       this.render();
     }
 
@@ -1594,61 +1890,84 @@
      *   background: string (default uses the widget's backgroundColor)
      */
     exportPng(options) {
-      const opts = {
-        filename: "decomposition-tree.png",
-        scale: 2,
-        background: this._settings.backgroundColor,
-        ...(options || {})
-      };
+      try {
+        const opts = {
+          filename: "decomposition-tree.png",
+          scale: 2,
+          background: this._settings.backgroundColor,
+          ...(options || {})
+        };
 
-      const svgEl = this.shadowRoot.querySelector(".dt-main-svg");
-      if (!svgEl) return;
+        // Sanitize inputs
+        if (typeof opts.filename !== "string" || !opts.filename.trim()) {
+          opts.filename = "decomposition-tree.png";
+        }
+        opts.filename = opts.filename.replace(/[\/\\:*?"<>|]/g, "_");
+        const scale = Number(opts.scale);
+        opts.scale = Number.isFinite(scale) && scale > 0 && scale <= 10 ? scale : 2;
 
-      const w = Number(svgEl.getAttribute("width"));
-      const h = Number(svgEl.getAttribute("height"));
-      if (!w || !h) return;
+        const svgEl = this.shadowRoot.querySelector(".dt-main-svg");
+        if (!svgEl) return;
 
-      // Build a self-contained SVG string with all styles embedded.
-      // This avoids cloneNode + getComputedStyle issues in shadow DOM.
-      const svgString = this._buildExportSvgString(svgEl, w, h, opts.background);
+        const w = Number(svgEl.getAttribute("width"));
+        const h = Number(svgEl.getAttribute("height"));
+        if (!w || !h) return;
 
-      // Use base64 data URL (more reliable than blob URL in SAC's webview)
-      const base64 = btoa(unescape(encodeURIComponent(svgString)));
-      const dataUrl = "data:image/svg+xml;base64," + base64;
+        // Build a self-contained SVG string with all styles embedded.
+        // This avoids cloneNode + getComputedStyle issues in shadow DOM.
+        const svgString = this._buildExportSvgString(svgEl, w, h, opts.background);
 
-      const img = new Image();
-      const scale = opts.scale;
-      const filename = opts.filename;
+        // Use base64 data URL (more reliable than blob URL in SAC's webview)
+        const base64 = btoa(unescape(encodeURIComponent(svgString)));
+        const dataUrl = "data:image/svg+xml;base64," + base64;
 
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.round(w * scale);
-        canvas.height = Math.round(h * scale);
-        const ctx = canvas.getContext("2d");
-        ctx.scale(scale, scale);
-        ctx.drawImage(img, 0, 0, w, h);
+        const img = new Image();
+        const finalScale = opts.scale;
+        const filename = opts.filename;
 
-        canvas.toBlob(blob => {
-          if (!blob) return;
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.href = url;
-          a.download = filename;
-          a.style.display = "none";
-          document.body.appendChild(a);
-          a.click();
-          setTimeout(() => {
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
-          }, 100);
-        }, "image/png");
-      };
+        img.onload = () => {
+          try {
+            const canvas = document.createElement("canvas");
+            canvas.width = Math.round(w * finalScale);
+            canvas.height = Math.round(h * finalScale);
+            const ctx = canvas.getContext("2d");
+            ctx.scale(finalScale, finalScale);
+            ctx.drawImage(img, 0, 0, w, h);
 
-      img.onerror = (e) => {
-        console.error("Decomposition Tree: PNG export failed", e);
-      };
+            canvas.toBlob(blob => {
+              if (!blob) {
+                console.error("Decomposition Tree: PNG export — canvas.toBlob returned null");
+                return;
+              }
+              try {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = filename;
+                a.style.display = "none";
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => {
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }, 100);
+              } catch (downloadErr) {
+                console.error("Decomposition Tree: PNG download failed", downloadErr);
+              }
+            }, "image/png");
+          } catch (canvasErr) {
+            console.error("Decomposition Tree: PNG canvas rendering failed", canvasErr);
+          }
+        };
 
-      img.src = dataUrl;
+        img.onerror = (e) => {
+          console.error("Decomposition Tree: PNG export failed — SVG image load error", e);
+        };
+
+        img.src = dataUrl;
+      } catch (e) {
+        console.error("Decomposition Tree: exportPng failed", e);
+      }
     }
 
     // Build a fully self-contained SVG string with embedded <style>,
@@ -1739,147 +2058,7 @@
 </svg>`;
     }
 
-    // Legacy method kept for backward compatibility — no longer used
-    // by exportPng but may be called by scripting.
-    _inlineSvgStyles(clonedSvg) {
-      const s = this._settings;
 
-      // Background-level styles
-      clonedSvg.style.fontFamily = "Arial, sans-serif";
-
-      // Create an SVG <filter> for the drop shadow (CSS filter doesn't
-      // work when the SVG is rendered via Canvas <img>).
-      const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
-      defs.innerHTML = `
-        <filter id="dt-export-shadow" x="-5%" y="-5%" width="115%" height="120%">
-          <feDropShadow dx="0" dy="1" stdDeviation="1.5"
-            flood-color="${s.nodeShadowColor}" flood-opacity="0.18" />
-        </filter>
-      `;
-      clonedSvg.insertBefore(defs, clonedSvg.firstChild);
-
-      // Node cards
-      clonedSvg.querySelectorAll(".node-card").forEach(el => {
-        if (!el.getAttribute("fill") && !el.style.fill) {
-          el.setAttribute("fill", s.nodeBackgroundColor);
-        }
-        if (!el.style.stroke) {
-          el.setAttribute("stroke", s.nodeBorderColor);
-        }
-        // Apply SVG filter for shadow (CSS filter won't work in Canvas)
-        el.setAttribute("filter", "url(#dt-export-shadow)");
-      });
-
-      // Dashed border for Others nodes
-      clonedSvg.querySelectorAll(".others-node .node-card").forEach(el => {
-        el.setAttribute("stroke-dasharray", "4 3");
-      });
-
-      // Node labels
-      clonedSvg.querySelectorAll(".node-label").forEach(el => {
-        if (!el.getAttribute("fill") || el.getAttribute("fill") === "") {
-          el.setAttribute("fill", s.labelColor);
-        }
-        el.style.fontSize = "12px";
-        el.style.fontWeight = el.getAttribute("font-weight") || "600";
-        el.style.fontFamily = "Arial, sans-serif";
-      });
-
-      // Others node labels
-      clonedSvg.querySelectorAll(".others-node .node-label").forEach(el => {
-        if (!el.getAttribute("fill") || el.getAttribute("fill") === s.labelColor) {
-          el.setAttribute("fill", s.othersLabelColor);
-        }
-      });
-
-      // Value labels
-      clonedSvg.querySelectorAll(".value-label").forEach(el => {
-        el.setAttribute("fill", s.valueLabelColor);
-        el.style.fontSize = "11px";
-        el.style.fontFamily = "Arial, sans-serif";
-      });
-
-      // Percent labels
-      clonedSvg.querySelectorAll(".pct-label").forEach(el => {
-        el.setAttribute("fill", s.labelColor);
-        el.style.fontSize = "11px";
-        el.style.fontWeight = "600";
-        el.style.fontFamily = "Arial, sans-serif";
-        el.style.opacity = "0.85";
-      });
-
-      // Variance labels (already have inline fill from render)
-      clonedSvg.querySelectorAll(".var-label").forEach(el => {
-        el.style.fontSize = "11px";
-        el.style.fontWeight = "700";
-        el.style.fontFamily = "Arial, sans-serif";
-      });
-
-      // Dimension tags
-      clonedSvg.querySelectorAll(".dim-tag").forEach(el => {
-        el.setAttribute("fill", s.valueLabelColor);
-        el.style.fontSize = "9px";
-        el.style.fontWeight = "600";
-        el.style.fontFamily = "Arial, sans-serif";
-        el.style.opacity = "0.7";
-        el.style.textTransform = "uppercase";
-        el.style.letterSpacing = "0.03em";
-      });
-
-      // Bar backgrounds
-      clonedSvg.querySelectorAll(".bar-bg").forEach(el => {
-        el.setAttribute("fill", s.barBackgroundColor);
-      });
-
-      // Plan bars (already have inline fill from render)
-      clonedSvg.querySelectorAll(".bar-plan").forEach(el => {
-        el.style.opacity = "0.55";
-      });
-
-      // Connectors
-      clonedSvg.querySelectorAll(".connector").forEach(el => {
-        el.setAttribute("stroke", s.connectorColor);
-        el.setAttribute("stroke-width", "1.3");
-        el.setAttribute("fill", "none");
-      });
-
-      // Toggle circles
-      clonedSvg.querySelectorAll(".toggle circle").forEach(el => {
-        el.setAttribute("fill", s.toggleBackgroundColor);
-        el.setAttribute("stroke", s.toggleBorderColor);
-      });
-
-      // Toggle text
-      clonedSvg.querySelectorAll(".toggle text").forEach(el => {
-        el.setAttribute("fill", s.toggleTextColor);
-        el.style.fontSize = "13px";
-        el.style.fontFamily = "Arial, sans-serif";
-      });
-
-      // Change-dim button (show it in export even though it's hover-only on screen)
-      clonedSvg.querySelectorAll(".change-dim rect").forEach(el => {
-        el.style.opacity = "0"; // keep hidden in export
-      });
-      clonedSvg.querySelectorAll(".change-dim text").forEach(el => {
-        el.style.opacity = "0";
-      });
-
-      // Selection styles
-      clonedSvg.querySelectorAll(".dt-node.selected .node-card").forEach(el => {
-        el.setAttribute("stroke", s.focusBorderColor);
-        el.setAttribute("stroke-width", "2.5");
-      });
-      clonedSvg.querySelectorAll(".dt-node.selected .node-label").forEach(el => {
-        el.setAttribute("fill", s.focusBorderColor);
-      });
-      clonedSvg.querySelectorAll(".dt-node.on-path .node-card").forEach(el => {
-        el.setAttribute("stroke", s.focusBorderColor);
-        el.setAttribute("stroke-width", "1.5");
-      });
-      clonedSvg.querySelectorAll(".dt-node.dimmed").forEach(el => {
-        el.style.opacity = "0.42";
-      });
-    }
 
     /**
      * exportCsv(options?)
@@ -1896,16 +2075,26 @@
      *                  non-expanded children by walking the full tree
      */
     exportCsv(options) {
-      const opts = {
-        filename: "decomposition-tree.csv",
-        separator: ",",
-        includeHidden: false,
-        ...(options || {})
-      };
+      try {
+        const opts = {
+          filename: "decomposition-tree.csv",
+          separator: ",",
+          includeHidden: false,
+          ...(options || {})
+        };
 
-      const sep = opts.separator;
-      const rootTree = this._lazyTree ? [this._lazyTree] : this._tree;
-      if (!rootTree.length) return;
+        // Sanitize inputs
+        if (typeof opts.filename !== "string" || !opts.filename.trim()) {
+          opts.filename = "decomposition-tree.csv";
+        }
+        opts.filename = opts.filename.replace(/[\/\\:*?"<>|]/g, "_");
+        if (typeof opts.separator !== "string" || !opts.separator) {
+          opts.separator = ",";
+        }
+
+        const sep = opts.separator;
+        const rootTree = this._lazyTree ? [this._lazyTree] : this._tree;
+        if (!rootTree.length) return;
 
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
 
@@ -1933,7 +2122,7 @@
           pctOfParent: pctParent,
           pctOfTotal: pctTotal,
           rank: node._rank || "",
-          isOthers: node.isOthers ? "Yes" : ""
+          isOthers: node.isOthers ? this._str("yes") : ""
         });
 
         if (node.children) {
@@ -1949,12 +2138,12 @@
 
       // Build CSV
       const headers = [
-        "Level", "Label", "Dimension", "Value"
+        this._str("level"), this._str("label"), this._str("dimension"), this._str("value")
       ];
       if (hasPlan) {
-        headers.push("Plan", "Variance", "Variance %");
+        headers.push(this._str("plan"), this._str("variance"), this._str("variancePct"));
       }
-      headers.push("% of Parent", "% of Total", "Rank", "Is Others");
+      headers.push(this._str("pctOfParent"), this._str("pctOfTotal"), this._str("rank"), this._str("isOthers"));
 
       const csvEscape = val => {
         const s = String(val ?? "");
@@ -2001,28 +2190,42 @@
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      } catch (e) {
+        console.error("Decomposition Tree: exportCsv failed", e);
+      }
     }
 
     expandAll() {
+      const budget = Math.max(10, toNumber(this._settings.maxVisibleNodes) || 500);
+      let count = 0;
       if (this._lazyTree) {
         const visit = node => {
+          if (count >= budget) return;
           this._expanded.add(node.id);
+          count++;
           this._materializeChildren(node);
           if (node.children) node.children.forEach(visit);
         };
         visit(this._lazyTree);
+        if (count >= budget) {
+          console.warn(`DecompositionTree: expandAll stopped after ${budget} nodes (maxVisibleNodes limit). Use setExpandedLevel or expand specific paths instead.`);
+        }
       } else {
         const visit = node => {
+          if (count >= budget) return;
           this._expanded.add(node.id);
+          count++;
           if (node.children) node.children.forEach(visit);
         };
         this._tree.forEach(visit);
       }
+      this._rebuildExpandedByLevel();
       this.render();
     }
 
     collapseAll() {
       this._expanded.clear();
+      this._expandedByLevel.clear();
       this.render();
     }
 
@@ -2042,6 +2245,7 @@
         };
         this._tree.forEach(root => visit(root, 0));
       }
+      this._rebuildExpandedByLevel();
       if (doRender) this.render();
     }
 
@@ -2077,6 +2281,8 @@
     // an Others bucket clears any active selection — neither represents
     // a usable filter context.
     selectNode(nodeId) {
+      if (typeof nodeId !== "string" && typeof nodeId !== "number") return;
+      nodeId = String(nodeId);
       const node = this._findNodeById(nodeId);
       if (!node) return;
 
@@ -2164,7 +2370,7 @@
       if (!node) return;
 
       if (this._expanded.has(nodeId)) {
-        this._expanded.delete(nodeId);
+        this._trackCollapse(nodeId, node.level);
         this.dispatchEvent(
           new CustomEvent("onNodeCollapse", { detail: { nodeId } })
         );
@@ -2187,7 +2393,7 @@
         this._materializeChildren(node);
       }
 
-      this._expanded.add(nodeId);
+      this._trackExpand(nodeId, node.level);
       this.dispatchEvent(
         new CustomEvent("onNodeExpand", { detail: { nodeId } })
       );
@@ -2263,7 +2469,8 @@
       if (!this._lazyTree) return;
       const toDelete = new Set();
       const visit = node => {
-        if (node.level >= level) toDelete.add(node.id);
+        // Never collapse root (level 0) — it must always remain expandable.
+        if (node.level >= level && node.level > 0) toDelete.add(node.id);
         if (node.children) node.children.forEach(visit);
       };
       visit(this._lazyTree);
@@ -2273,6 +2480,36 @@
       if (this._selectedNodeId && toDelete.has(this._selectedNodeId)) {
         this._selectedNodeId = null;
       }
+      this._rebuildExpandedByLevel();
+    }
+
+    // Safely escape a string for use in a CSS attribute selector.
+    // Uses CSS.escape where available (all modern browsers), with a
+    // fallback that escapes all non-alphanumeric characters.
+    _escapeCssSelector(value) {
+      if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+        return CSS.escape(value);
+      }
+      // Fallback: escape anything that isn't a safe ASCII character.
+      return String(value).replace(/[^a-zA-Z0-9_-]/g, ch => "\\" + ch);
+    }
+
+    // Push a message to the screen reader's aria-live region.
+    _announceToLiveRegion(message) {
+      const el = this.shadowRoot
+        ? this.shadowRoot.querySelector(".dt-live-region")
+        : null;
+      if (!el) return;
+      // Clear first to ensure re-announcement of the same text
+      el.textContent = "";
+      requestAnimationFrame(() => {
+        el.textContent = message;
+      });
+    }
+
+    // i18n: get a localized string with fallback.
+    _str(key) {
+      return this._strings[key] || DEFAULT_STRINGS[key] || key;
     }
 
     /* ---------- Visual helpers ---------- */
@@ -2327,6 +2564,31 @@
     /* ---------- Render ---------- */
 
     render() {
+      try {
+        this._renderInternal();
+      } catch (e) {
+        console.error("DecompositionTree: render error", e);
+        if (this.shadowRoot) {
+          // Preserve the persistent style element, replace only content
+          const contentDiv = this.shadowRoot.querySelector(".viewport") ||
+                             this.shadowRoot.querySelector(".state");
+          if (contentDiv) {
+            contentDiv.outerHTML = `<div class="state" style="color:#dc2626">
+              An error occurred while rendering the tree. Try refreshing the page or adjusting your data/settings.
+            </div>`;
+          } else {
+            // Fallback: style element is already in shadow DOM from connectedCallback
+            const errDiv = document.createElement("div");
+            errDiv.className = "state";
+            errDiv.style.color = "#dc2626";
+            errDiv.textContent = this._str("renderError");
+            this.shadowRoot.appendChild(errDiv);
+          }
+        }
+      }
+    }
+
+    _renderInternal() {
       if (!this.shadowRoot) return;
       this._clearLevelInUseCache();
 
@@ -2335,43 +2597,45 @@
       const visible = computeVisibleNodes(rootTree, this._expanded);
 
       if (!visible.length) {
-        this.shadowRoot.innerHTML = "";
+        this._setContentHtml("");
         this._teardownGlobalListeners();
         return;
       }
 
       if (visible.length > s.maxVisibleNodes) {
-        this.shadowRoot.innerHTML =
-          this.styles() +
+        this._setContentHtml(
           `<div class="state">
-            Too many nodes to display (${visible.length}).
-            Collapse levels, reduce Top-N, or apply filters.
-          </div>`;
+            ${escapeXml(this._str("tooManyNodes"))} (${visible.length}).
+            ${escapeXml(this._str("collapseHint"))}
+          </div>`);
         this._teardownGlobalListeners();
         return;
       }
 
+      const isRtl = s.direction === "rtl";
+      const maxLevel = Math.max(0, ...visible.map(n => n.level));
+      // Total width needed for the tree (used for RTL mirror calculation)
+      const treeWidth = Math.max(700, 40 + (maxLevel + 1) * (s.nodeWidth + s.levelGap));
+
       const positioned = visible.map((node, rowIndex) => {
         const off = this._nodeOffsets.get(node.id);
+        const ltrX = 20 + node.level * (s.nodeWidth + s.levelGap);
+        // RTL: mirror horizontally — root on right, children expand left
+        const baseX = isRtl ? (treeWidth - 20 - s.nodeWidth - node.level * (s.nodeWidth + s.levelGap)) : ltrX;
         return {
           ...node,
-          x: 20 + node.level * (s.nodeWidth + s.levelGap) + (off ? off.dx : 0),
+          x: baseX + (off ? (isRtl ? -off.dx : off.dx) : 0),
           y: 20 + rowIndex * (s.nodeHeight + s.siblingGap) + (off ? off.dy : 0),
-          _defaultX: 20 + node.level * (s.nodeWidth + s.levelGap),
+          _defaultX: baseX,
           _defaultY: 20 + rowIndex * (s.nodeHeight + s.siblingGap),
           width: s.nodeWidth,
           height: s.nodeHeight
         };
       });
 
-      const maxLevel = Math.max(0, ...positioned.map(n => n.level));
       const maxX = Math.max(700, ...positioned.map(n => n.x + n.width + 20));
       const maxY = Math.max(240, ...positioned.map(n => n.y + n.height + 20));
-      const width = Math.max(
-        700,
-        40 + (maxLevel + 1) * (s.nodeWidth + s.levelGap),
-        maxX
-      );
+      const width = Math.max(treeWidth, maxX);
       const height = Math.max(
         240,
         40 + positioned.length * (s.nodeHeight + s.siblingGap),
@@ -2402,12 +2666,18 @@
       // hidden (plus their descendants, to avoid orphans). Then re-filter
       // positioned, re-index, and recompute Y positions so connectors
       // and layout remain correct.
+      //
+      // Phase 2 optimization: evaluate CF once per node, cache results
+      // in a Map. The SVG generation loop reads from this cache instead
+      // of re-evaluating.
       let renderNodes = positioned;
+      const cfCache = new Map();
       if (this._cfRules.length) {
         const hiddenIds = new Set();
         for (const n of positioned) {
           if (hiddenIds.has(n.id)) continue; // already hidden by ancestor
           const cf = evaluateConditionalFormatting(n, this._cfRules);
+          cfCache.set(n.id, cf);
           if (cf && cf.hide) {
             // Hide this node and all its descendants
             hiddenIds.add(n.id);
@@ -2448,9 +2718,11 @@
         .filter(n => n.parentVisibleIndex !== null && byIndex2.has(n.parentVisibleIndex))
         .map(n => {
           const p = byIndex2.get(n.parentVisibleIndex);
-          const x1 = p.x + p.width;
+          // LTR: parent right edge → child left edge
+          // RTL: parent left edge → child right edge
+          const x1 = isRtl ? p.x : (p.x + p.width);
           const y1 = p.y + p.height / 2;
-          const x2 = n.x;
+          const x2 = isRtl ? (n.x + n.width) : n.x;
           const y2 = n.y + n.height / 2;
           const mid = (x1 + x2) / 2;
           return `<path class="connector" d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" />`;
@@ -2514,9 +2786,9 @@
           let fill = this.getNodeColor(node);
           const displayLabel = this.getNodeDisplayLabel(node);
 
-          // Conditional formatting: evaluate rules for this node.
+          // Conditional formatting: read from pre-computed cache.
           // (Hide action already handled in pre-filter above.)
-          const cf = evaluateConditionalFormatting(node, this._cfRules);
+          const cf = cfCache.get(node.id) || (this._cfRules.length ? evaluateConditionalFormatting(node, this._cfRules) : null);
           const cfBarColor       = cf && cf.barColor       ? cf.barColor       : null;
           const cfLabelBold      = cf && cf.labelBold      ? true              : false;
           const cfLabelColor     = cf && cf.labelColor     ? cf.labelColor     : null;
@@ -2541,10 +2813,18 @@
             ? Math.min(node.width / 2, Math.max(20, dimLabel.length * 6.5))
             : 0;
           const togglePad = hasChildren ? 16 : 0;
-          const labelStartX = node.x + padL + togglePad;
-          const labelMaxRight = node.x + node.width - padR -
-            (showDimTag ? dimTagEstWidth + tagGap : 0);
+          // RTL: toggle goes on the right, label starts from right
+          const labelStartX = isRtl
+            ? node.x + padL
+            : node.x + padL + togglePad;
+          const labelMaxRight = isRtl
+            ? node.x + node.width - padR - togglePad - (showDimTag ? dimTagEstWidth + tagGap : 0)
+            : node.x + node.width - padR - (showDimTag ? dimTagEstWidth + tagGap : 0);
           const labelMaxWidth = Math.max(20, labelMaxRight - labelStartX);
+          // Toggle position: left in LTR, right in RTL
+          const toggleCx = isRtl
+            ? node.x + node.width - padR
+            : node.x + padL;
           // Unique clip id per node so each label clips to its own width.
           const labelClipId = `dt-clip-${node.visibleIndex}`;
 
@@ -2554,8 +2834,13 @@
               data-node-id="${escapeXml(node.id)}"
               data-has-children="${hasChildren ? "true" : "false"}"
               tabindex="0"
-              role="button"
-              aria-label="${escapeXml(displayLabel)}"
+              role="treeitem"
+              aria-label="${escapeXml(displayLabel)}${s.showValues !== false ? `, ${formatNumber(node.value)}` : ""}"
+              aria-level="${node.level + 1}"
+              aria-expanded="${hasChildren ? (expanded ? "true" : "false") : ""}"
+              ${isSelected ? 'aria-selected="true"' : ""}
+              aria-setsize="${node._siblingCount || 1}"
+              aria-posinset="${node._rank || 1}"
             >
               <rect
                 class="node-card"
@@ -2572,8 +2857,8 @@
                 hasChildren
                   ? `
                     <g class="toggle" data-action="toggle" data-node-id="${escapeXml(node.id)}">
-                      <circle cx="${node.x + padL}" cy="${node.y + 19}" r="9"></circle>
-                      <text x="${node.x + padL}" y="${node.y + 23}" text-anchor="middle">${expanded ? "−" : "+"}</text>
+                      <circle cx="${toggleCx}" cy="${node.y + 19}" r="9"></circle>
+                      <text x="${toggleCx}" y="${node.y + 23}" text-anchor="middle">${expanded ? "−" : "+"}</text>
                     </g>
                   `
                   : ""
@@ -2588,7 +2873,7 @@
 
               ${
                 showDimTag
-                  ? `<text class="dim-tag" x="${node.x + node.width - padR}" y="${node.y + 14}" text-anchor="end">${escapeXml(dimLabel)}</text>`
+                  ? `<text class="dim-tag" x="${isRtl ? node.x + padL : node.x + node.width - padR}" y="${node.y + 14}" text-anchor="${isRtl ? "start" : "end"}">${escapeXml(dimLabel)}</text>`
                   : ""
               }
 
@@ -2651,32 +2936,32 @@
       const showReset = hasOffsets || isZoomed;
 
       const exportBarHtml = showExportBar || showReset || showZoom ? `
-            <div class="export-toolbar" aria-label="Toolbar">
+            <div class="export-toolbar" aria-label="${escapeXml(this._str("toolbar"))}">
               ${showZoom ? `
-                <button type="button" class="export-btn" data-action="zoom-in" title="Zoom in">
+                <button type="button" class="export-btn" data-action="zoom-in" title="${escapeXml(this._str("zoomIn"))}">
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M5 7h4M7 5v4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
                 </button>
                 <span class="zoom-label">${Math.round(this._zoom * 100)}%</span>
-                <button type="button" class="export-btn" data-action="zoom-out" title="Zoom out">
+                <button type="button" class="export-btn" data-action="zoom-out" title="${escapeXml(this._str("zoomOut"))}">
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="5.5" stroke="currentColor" stroke-width="1.3"/><path d="M11 11l3.5 3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M5 7h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
                 </button>
-                <button type="button" class="export-btn" data-action="zoom-fit" title="Fit to view">
+                <button type="button" class="export-btn" data-action="zoom-fit" title="${escapeXml(this._str("fitToView"))}">
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M2 6h4V2M10 2v4h4M14 10h-4v4M6 14v-4H2" stroke="currentColor" stroke-width="1.1"/></svg>
                 </button>
               ` : ""}
               ${showReset ? `
-                <button type="button" class="export-btn" data-action="reset-layout" title="Reset positions & zoom">
+                <button type="button" class="export-btn" data-action="reset-layout" title="${escapeXml(this._str("resetPositionsZoom"))}">
                   <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 8a6 6 0 0111.3-2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M14 8a6 6 0 01-11.3 2.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M13 2v3.2h-3.2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                  <span>Reset</span>
+                  <span>${escapeXml(this._str("resetLayout"))}</span>
                 </button>
               ` : ""}
-              ${showPngBtn ? `<button type="button" class="export-btn" data-action="export-png" title="Export as PNG image">
+              ${showPngBtn ? `<button type="button" class="export-btn" data-action="export-png" title="${escapeXml(this._str("exportAsPng"))}">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 11l4-5 3 3.5 2-2 3 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><rect x="1" y="1" width="14" height="14" rx="2" stroke="currentColor" stroke-width="1.3"/></svg>
-                <span>PNG</span>
+                <span>${escapeXml(this._str("exportPng"))}</span>
               </button>` : ""}
-              ${showCsvBtn ? `<button type="button" class="export-btn" data-action="export-csv" title="Export as CSV data">
+              ${showCsvBtn ? `<button type="button" class="export-btn" data-action="export-csv" title="${escapeXml(this._str("exportAsCsv"))}">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4 1h8l3 3v11H1V1z" stroke="currentColor" stroke-width="1.3"/><path d="M4 8h8M4 11h5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-                <span>CSV</span>
+                <span>${escapeXml(this._str("exportCsv"))}</span>
               </button>` : ""}
             </div>` : "";
 
@@ -2686,13 +2971,12 @@
         : "";
       const svgCursor = showZoom ? (this._panState ? "grabbing" : "grab") : "default";
 
-      this.shadowRoot.innerHTML =
-        this.styles() +
-        `
+      this._setContentHtml(`
           <div class="viewport" style="cursor:${showDrag ? "default" : "auto"}">
             ${bannerHtml}
             ${exportBarHtml}
-            <svg class="dt-main-svg" width="${width}" height="${renderHeight}" viewBox="0 0 ${width} ${renderHeight}" role="img" aria-label="Decomposition tree" style="cursor:${svgCursor}">
+            <div class="dt-live-region" role="status" aria-live="polite" aria-atomic="true"></div>
+            <svg class="dt-main-svg" width="${width}" height="${renderHeight}" viewBox="0 0 ${width} ${renderHeight}" role="tree" aria-label="Decomposition tree" style="cursor:${svgCursor}">
               <g class="dt-zoom-group" ${zoomTransform ? `transform="${zoomTransform}"` : ""}>
                 ${connectors2}
                 ${nodes}
@@ -2701,7 +2985,7 @@
             ${hoverHtml}
             ${pickerHtml}
           </div>
-        `;
+        `);
 
       this._wireViewportEvents();
       this._wireGlobalListeners();
@@ -2722,14 +3006,14 @@
       return `
         <div class="selection-banner" role="status">
           <span class="sb-icon" aria-hidden="true">●</span>
-          <span class="sb-label">Filtering by</span>
+          <span class="sb-label">${escapeXml(this._str("filteringBy"))}</span>
           <span class="sb-path">${pathText}</span>
           <button
             type="button"
             class="sb-clear"
             data-action="clear-selection"
-            aria-label="Clear selection"
-          >Clear ✕</button>
+            aria-label="${escapeXml(this._str("clearSelection"))}"
+          >${escapeXml(this._str("clearSelection"))} ✕</button>
         </div>
       `;
     }
@@ -2774,8 +3058,8 @@
 
       const hasPlan = !!(this._dataset && this._dataset.planAlias);
       const inComparisonMode = hasPlan && s.showPlanBar !== false;
-      const measureName = this._dataset ? (this._dataset.measureName || "Value") : "Value";
-      const planName = this._dataset && this._dataset.planName ? this._dataset.planName : "Plan";
+      const measureName = this._dataset ? (this._dataset.measureName || this._str("value")) : this._str("value");
+      const planName = this._dataset && this._dataset.planName ? this._dataset.planName : this._str("plan");
 
       const valueRow = `
         <div class="hc-row hc-row-main">
@@ -2801,14 +3085,14 @@
             <span class="hc-row-value">${formatNumber(planVal)}</span>
           </div>
           <div class="hc-row">
-            <span class="hc-row-label">Variance</span>
+            <span class="hc-row-label">${escapeXml(this._str("variance"))}</span>
             <span class="hc-row-value" style="color:${varColor}">${escapeXml(formatSignedNumber(variance))}</span>
           </div>
           ${
             Number.isFinite(variancePct)
               ? `
                 <div class="hc-row">
-                  <span class="hc-row-label">Variance %</span>
+                  <span class="hc-row-label">${escapeXml(this._str("variancePct"))}</span>
                   <span class="hc-row-value" style="color:${varColor}">${escapeXml(formatSignedPercent(variancePct, s.percentDecimals))}</span>
                 </div>
               `
@@ -2821,7 +3105,7 @@
         node.level > 0 && Number.isFinite(node._pctOfParent)
           ? `
             <div class="hc-row">
-              <span class="hc-row-label">% of parent</span>
+              <span class="hc-row-label">${escapeXml(this._str("pctOfParent"))}</span>
               <span class="hc-row-value">${escapeXml(formatPercent(node._pctOfParent, s.percentDecimals))}</span>
             </div>
           `
@@ -2831,7 +3115,7 @@
         node.level > 0 && Number.isFinite(node._pctOfTotal)
           ? `
             <div class="hc-row">
-              <span class="hc-row-label">% of total</span>
+              <span class="hc-row-label">${escapeXml(this._str("pctOfTotal"))}</span>
               <span class="hc-row-value">${escapeXml(formatPercent(node._pctOfTotal, s.percentDecimals))}</span>
             </div>
           `
@@ -2841,7 +3125,7 @@
         node.level > 0 && node._rank && node._siblingCount
           ? `
             <div class="hc-row">
-              <span class="hc-row-label">Rank</span>
+              <span class="hc-row-label">${escapeXml(this._str("rank"))}</span>
               <span class="hc-row-value">${node._rank} of ${node._siblingCount}</span>
             </div>
           `
@@ -2851,7 +3135,7 @@
         node.isOthers && node.hiddenChildrenCount
           ? `
             <div class="hc-row">
-              <span class="hc-row-label">Hidden members</span>
+              <span class="hc-row-label">${escapeXml(this._str("hiddenMembers"))}</span>
               <span class="hc-row-value">${node.hiddenChildrenCount}</span>
             </div>
           `
@@ -2906,8 +3190,8 @@
 
       const titleText =
         this._picker.mode === "change"
-          ? "Change dimension at this level"
-          : "Drill by…";
+          ? this._str("changeDimension")
+          : this._str("drillBy");
 
       return `
         <div class="picker" style="left:${left}px; top:${top}px;">
@@ -3007,10 +3291,70 @@
             const hasChildren = el.getAttribute("data-has-children") === "true";
             if (hasChildren && nodeId) {
               this.toggleNode(nodeId);
+              this._announceToLiveRegion(
+                this._expanded.has(nodeId)
+                  ? `${el.getAttribute("aria-label")}, expanded`
+                  : `${el.getAttribute("aria-label")}, collapsed`
+              );
             } else if (nodeId) {
-              // Leaf node: select it (same as mouse click)
               this.selectNode(nodeId);
             }
+          }
+
+          // WAI-ARIA Treeview keyboard pattern
+          const allNodes = Array.from(this.shadowRoot.querySelectorAll(".dt-node"));
+          const currentIdx = allNodes.indexOf(el);
+
+          if (event.key === "ArrowDown") {
+            event.preventDefault();
+            const next = allNodes[currentIdx + 1];
+            if (next) next.focus();
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            const prev = allNodes[currentIdx - 1];
+            if (prev) prev.focus();
+          } else if (event.key === "ArrowRight") {
+            event.preventDefault();
+            const hasChildren = el.getAttribute("data-has-children") === "true";
+            const isExpanded = el.getAttribute("aria-expanded") === "true";
+            if (hasChildren && !isExpanded && nodeId) {
+              // Expand the node
+              this.toggleNode(nodeId);
+              this._announceToLiveRegion(`${el.getAttribute("aria-label")}, expanded`);
+            } else if (hasChildren && isExpanded) {
+              // Move to first child
+              const next = allNodes[currentIdx + 1];
+              if (next) next.focus();
+            }
+          } else if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            const hasChildren = el.getAttribute("data-has-children") === "true";
+            const isExpanded = el.getAttribute("aria-expanded") === "true";
+            if (hasChildren && isExpanded && nodeId) {
+              // Collapse the node
+              this.toggleNode(nodeId);
+              this._announceToLiveRegion(`${el.getAttribute("aria-label")}, collapsed`);
+            } else {
+              // Move to parent node
+              const nodeData = this._cachedPositioned
+                ? this._cachedPositioned.find(n => n.id === nodeId)
+                : null;
+              if (nodeData && nodeData.parentVisibleIndex !== null) {
+                const parentNode = allNodes.find(n => {
+                  const parentData = this._cachedPositioned
+                    ? this._cachedPositioned[nodeData.parentVisibleIndex]
+                    : null;
+                  return parentData && n.getAttribute("data-node-id") === parentData.id;
+                });
+                if (parentNode) parentNode.focus();
+              }
+            }
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            if (allNodes[0]) allNodes[0].focus();
+          } else if (event.key === "End") {
+            event.preventDefault();
+            if (allNodes.length) allNodes[allNodes.length - 1].focus();
           }
         });
 
@@ -3094,15 +3438,16 @@
 
         this._nodeOffsets.set(this._dragState.nodeId, { dx, dy });
 
-        // Full re-render on each animation frame. This is the simplest
-        // correct approach: no ghost bounding boxes, no attribute shifting,
-        // no stale positions, and the SVG viewBox automatically expands
-        // to fit dragged nodes at their new positions.
+        // Targeted DOM update during drag: move only the dragged node
+        // and update its connectors. This avoids the innerHTML rebuild
+        // that would destroy the SVG element holding the pointer capture.
         if (!this._dragRafPending) {
           this._dragRafPending = true;
           requestAnimationFrame(() => {
             this._dragRafPending = false;
-            if (this._dragState) this.render();
+            if (this._dragState) {
+              this._updateDraggedNodePosition(this._dragState.nodeId);
+            }
           });
         }
       });
@@ -3112,8 +3457,73 @@
         const wasDrag = this._dragState.moved;
         this._dragState = null;
         svg.releasePointerCapture(e.pointerId);
+        // Full re-render only on drop to reconcile all positions
         if (wasDrag) this.render();
       });
+    }
+
+    // Targeted DOM update during drag: reposition the dragged node's <g>
+    // and update all connectors that touch it — without rebuilding the DOM.
+    _updateDraggedNodePosition(nodeId) {
+      if (!this._cachedPositioned) return;
+
+      const s = this._settings;
+      const off = this._nodeOffsets.get(nodeId) || { dx: 0, dy: 0 };
+      const nodeData = this._cachedPositioned.find(n => n.id === nodeId);
+      if (!nodeData) return;
+
+      // Compute the new position
+      const newX = nodeData._defaultX + off.dx;
+      const newY = nodeData._defaultY + off.dy;
+
+      // Find the <g> element for this node and translate it
+      const nodeEl = this.shadowRoot.querySelector(
+        `.dt-node[data-node-id="${this._escapeCssSelector(nodeId)}"]`
+      );
+      if (!nodeEl) return;
+
+      // Apply translation as a transform offset from its rendered position
+      const deltaX = newX - nodeData.x;
+      const deltaY = newY - nodeData.y;
+      nodeEl.setAttribute("transform", `translate(${deltaX}, ${deltaY})`);
+
+      // Update connector paths that connect to or from this node
+      // We rebuild all connectors since it's cheap (string ops only)
+      // and ensures correctness for both parent and child connectors.
+      const byIndex = new Map(this._cachedPositioned.map(n => [n.visibleIndex, n]));
+      const svg = this.shadowRoot.querySelector(".dt-main-svg");
+      if (!svg) return;
+
+      // Remove old connectors and rebuild
+      svg.querySelectorAll(".connector").forEach(el => el.remove());
+      const zoomGroup = svg.querySelector(".dt-zoom-group");
+      if (!zoomGroup) return;
+
+      // Temporarily update the cached node position for connector calc
+      const origX = nodeData.x;
+      const origY = nodeData.y;
+      nodeData.x = newX;
+      nodeData.y = newY;
+
+      for (const n of this._cachedPositioned) {
+        if (n.parentVisibleIndex === null) continue;
+        const p = byIndex.get(n.parentVisibleIndex);
+        if (!p) continue;
+        const x1 = p.x + p.width;
+        const y1 = p.y + p.height / 2;
+        const x2 = n.x;
+        const y2 = n.y + n.height / 2;
+        const mid = (x1 + x2) / 2;
+        const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        path.classList.add("connector");
+        path.setAttribute("d", `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`);
+        // Insert connectors before nodes so they render behind
+        zoomGroup.insertBefore(path, zoomGroup.firstChild);
+      }
+
+      // Restore original cached position (full render on drop will reconcile)
+      nodeData.x = origX;
+      nodeData.y = origY;
     }
 
     _screenToSvg(clientX, clientY) {
@@ -3342,6 +3752,11 @@
       this._teardownGlobalListeners();
       if (!this._picker) return;
 
+      // Use AbortController so cleanup is guaranteed even if
+      // onCustomWidgetDestroy isn't called (e.g. page navigation).
+      this._globalAbort = new AbortController();
+      const signal = this._globalAbort.signal;
+
       const onDocClick = event => {
         const path = event.composedPath ? event.composedPath() : [];
         if (path.includes(this)) {
@@ -3356,37 +3771,29 @@
         if (event.key === "Escape") this._closePicker();
       };
 
-      this._docClickHandler = onDocClick;
-      this._escHandler = onEsc;
-
       // Defer to next tick so the click that opened the picker doesn't
       // immediately close it.
       setTimeout(() => {
-        if (this._docClickHandler === onDocClick) {
-          document.addEventListener("click", onDocClick, true);
-          document.addEventListener("keydown", onEsc, true);
+        if (!signal.aborted) {
+          document.addEventListener("click", onDocClick, { capture: true, signal });
+          document.addEventListener("keydown", onEsc, { capture: true, signal });
         }
       }, 0);
     }
 
     _teardownGlobalListeners() {
-      if (this._docClickHandler) {
-        document.removeEventListener("click", this._docClickHandler, true);
-        this._docClickHandler = null;
-      }
-      if (this._escHandler) {
-        document.removeEventListener("keydown", this._escHandler, true);
-        this._escHandler = null;
+      if (this._globalAbort) {
+        this._globalAbort.abort();
+        this._globalAbort = null;
       }
     }
 
     /* ---------- Styles ---------- */
 
-    styles() {
+    _buildStyleContent() {
       const s = this._settings;
       const shadowRgba = hexToRgba(s.nodeShadowColor, 0.18);
       return `
-        <style>
           :host {
             display: block;
             width: 100%;
@@ -3672,6 +4079,9 @@
             transition: opacity 180ms ease;
           }
           .viewport:hover .export-toolbar { opacity: 1; }
+          @media (hover: none) {
+            .export-toolbar { opacity: 1; }
+          }
           .export-btn {
             pointer-events: all;
             display: inline-flex;
@@ -3705,7 +4115,17 @@
           }
           .dt-node { cursor: ${s.enableNodeDrag !== false ? "grab" : "pointer"}; outline: none; pointer-events: all; }
           .dt-node:active { cursor: ${s.enableNodeDrag !== false ? "grabbing" : "pointer"}; }
-        </style>
+          .dt-live-region {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            margin: -1px;
+            padding: 0;
+            overflow: hidden;
+            clip: rect(0, 0, 0, 0);
+            white-space: nowrap;
+            border: 0;
+          }
       `;
     }
   }
@@ -4369,6 +4789,149 @@
     }
   }
 
+  /* ---------- Builder Panel ----------
+     Provides configuration UI for the SAC designer persona.
+     Controls: root label, topN, enableOthers, initialExpandLevel,
+     showValues, showPercentOfParent, direction, density mode.
+     Each control fires 'propertiesChanged' to push values to the widget. */
+
+  class DecompositionTreeBuilder extends HTMLElement {
+    constructor() { super(); this.attachShadow({ mode: "open" }); }
+    connectedCallback() { this.render(); }
+    render() {
+      this.shadowRoot.innerHTML = `
+        <style>
+          :host {
+            display: block;
+            font-family: "72", "72full", Arial, sans-serif;
+            padding: 12px;
+            color: #0f172a;
+            font-size: 12px;
+          }
+          .bp-title { font-weight: 700; font-size: 13px; margin-bottom: 12px; }
+          .bp-section { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e2e8f0; }
+          .bp-section:last-child { border-bottom: none; }
+          .bp-section-title { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; margin-bottom: 8px; }
+          label { display: block; margin-top: 8px; color: #334155; font-size: 12px; }
+          input[type="text"], input[type="number"], select {
+            width: 100%; box-sizing: border-box; padding: 6px 8px; margin-top: 3px;
+            border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px;
+            font-family: inherit; background: #fff; color: #0f172a;
+          }
+          input[type="number"] { width: 80px; }
+          .bp-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+          .bp-row label { margin-top: 0; flex: 1; }
+          .bp-toggle { display: flex; align-items: center; gap: 6px; margin-top: 8px; cursor: pointer; }
+          .bp-toggle input[type="checkbox"] { margin: 0; }
+          .bp-hint { font-size: 11px; color: #94a3b8; margin-top: 2px; line-height: 1.3; }
+        </style>
+        <div class="bp-title">Decomposition Tree</div>
+
+        <div class="bp-section">
+          <div class="bp-section-title">Data</div>
+          <label>Root label
+            <input type="text" data-key="rootLabel" value="${this._prop("rootLabel", "Total")}">
+          </label>
+          <label>Others label
+            <input type="text" data-key="othersLabel" value="${this._prop("othersLabel", "Others")}">
+          </label>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="enableOthers" ${this._prop("enableOthers", true) ? "checked" : ""}>
+            <span>Enable "Others" rollup</span>
+          </div>
+          <label>Top N
+            <input type="number" data-key="topN" min="1" max="100" value="${this._prop("topN", 10)}">
+          </label>
+          <div class="bp-hint">Members beyond Top N are rolled into "Others".</div>
+        </div>
+
+        <div class="bp-section">
+          <div class="bp-section-title">Display</div>
+          <label>Initial expand level
+            <input type="number" data-key="initialExpandLevel" min="0" max="10" value="${this._prop("initialExpandLevel", 1)}">
+          </label>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="showValues" ${this._prop("showValues", true) ? "checked" : ""}>
+            <span>Show values</span>
+          </div>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="showPercentOfParent" ${this._prop("showPercentOfParent", true) ? "checked" : ""}>
+            <span>Show % of parent</span>
+          </div>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="showDimensionTag" ${this._prop("showDimensionTag", true) ? "checked" : ""}>
+            <span>Show dimension tag</span>
+          </div>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="sortDescending" ${this._prop("sortDescending", true) ? "checked" : ""}>
+            <span>Sort descending (largest first)</span>
+          </div>
+        </div>
+
+        <div class="bp-section">
+          <div class="bp-section-title">Layout</div>
+          <label>Density
+            <select data-key="densityMode">
+              <option value="compact" ${this._prop("densityMode", "comfortable") === "compact" ? "selected" : ""}>Compact</option>
+              <option value="comfortable" ${this._prop("densityMode", "comfortable") === "comfortable" ? "selected" : ""}>Comfortable</option>
+              <option value="spacious" ${this._prop("densityMode", "comfortable") === "spacious" ? "selected" : ""}>Spacious</option>
+            </select>
+          </label>
+          <label>Direction
+            <select data-key="direction">
+              <option value="ltr" ${this._prop("direction", "ltr") === "ltr" ? "selected" : ""}>Left to Right</option>
+              <option value="rtl" ${this._prop("direction", "ltr") === "rtl" ? "selected" : ""}>Right to Left</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="bp-section">
+          <div class="bp-section-title">Interaction</div>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="enableNodeDrag" ${this._prop("enableNodeDrag", true) ? "checked" : ""}>
+            <span>Enable node drag</span>
+          </div>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="enableZoomPan" ${this._prop("enableZoomPan", true) ? "checked" : ""}>
+            <span>Enable zoom &amp; pan</span>
+          </div>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="showExportPng" ${this._prop("showExportPng", true) ? "checked" : ""}>
+            <span>Show PNG export</span>
+          </div>
+          <div class="bp-toggle">
+            <input type="checkbox" data-key="showExportCsv" ${this._prop("showExportCsv", true) ? "checked" : ""}>
+            <span>Show CSV export</span>
+          </div>
+        </div>
+      `;
+      this.shadowRoot.querySelectorAll("input, select").forEach(el => {
+        el.addEventListener("change", () => this._emitProperties());
+      });
+    }
+    _prop(key, fallback) {
+      // Try to read from the host widget's current property value
+      const host = this.closest("[data-sac-widget]") || this.getRootNode()?.host;
+      if (host && host[key] !== undefined) return host[key];
+      return fallback;
+    }
+    _emitProperties() {
+      const props = {};
+      this.shadowRoot.querySelectorAll("input, select").forEach(el => {
+        const key = el.dataset.key;
+        if (!key) return;
+        if (el.type === "checkbox") {
+          props[key] = el.checked;
+        } else if (el.type === "number") {
+          props[key] = Number(el.value);
+        } else {
+          props[key] = el.value;
+        }
+      });
+      this.dispatchEvent(new CustomEvent("propertiesChanged", { detail: { properties: props } }));
+    }
+  }
+
   /* ---------- Register elements ---------- */
 
   if (!customElements.get("com-company-decomposition-tree-v3")) {
@@ -4382,6 +4945,13 @@
     customElements.define(
       "com-company-decomposition-tree-v3-styling",
       DecompositionTreeStyling
+    );
+  }
+
+  if (!customElements.get("com-company-decomposition-tree-v3-builder")) {
+    customElements.define(
+      "com-company-decomposition-tree-v3-builder",
+      DecompositionTreeBuilder
     );
   }
 })();
