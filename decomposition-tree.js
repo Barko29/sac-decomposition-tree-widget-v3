@@ -4160,6 +4160,10 @@
     { prop: "paddingRight",          label: "Card right padding (px)",  type: "number",  min: 0,   max: 80 },
     { prop: "labelTagGap",           label: "Gap: label ↔ dim tag (px)",type: "number",  min: 0,   max: 80 },
     { prop: "showDimensionTag",      label: "Show dimension tag",       type: "boolean" },
+    { prop: "direction",              label: "Layout direction",         type: "select", options: [
+      { value: "ltr", label: "Left to Right" },
+      { value: "rtl", label: "Right to Left" }
+    ]},
 
     { section: "Bars" },
     { prop: "barColor",              label: "Bar color (positive)",     type: "color"  },
@@ -4790,10 +4794,12 @@
   }
 
   /* ---------- Builder Panel ----------
-     Provides configuration UI for the SAC designer persona.
-     Controls: root label, topN, enableOthers, initialExpandLevel,
-     showValues, showPercentOfParent, direction, density mode.
-     Each control fires 'propertiesChanged' to push values to the widget. */
+     Provides supplementary guidance in the Builder tab below SAC's
+     built-in data binding feed selectors. Does NOT contain property
+     controls — those belong in the Styling panel.
+
+     SAC automatically renders dimension/measure feed selectors from the
+     manifest's dataBindings section. This panel adds contextual help. */
 
   class DecompositionTreeBuilder extends HTMLElement {
     constructor() { super(); this.attachShadow({ mode: "open" }); }
@@ -4808,127 +4814,33 @@
             color: #0f172a;
             font-size: 12px;
           }
-          .bp-title { font-weight: 700; font-size: 13px; margin-bottom: 12px; }
-          .bp-section { margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e2e8f0; }
-          .bp-section:last-child { border-bottom: none; }
-          .bp-section-title { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; margin-bottom: 8px; }
-          label { display: block; margin-top: 8px; color: #334155; font-size: 12px; }
-          input[type="text"], input[type="number"], select {
-            width: 100%; box-sizing: border-box; padding: 6px 8px; margin-top: 3px;
-            border: 1px solid #cbd5e1; border-radius: 6px; font-size: 12px;
-            font-family: inherit; background: #fff; color: #0f172a;
-          }
-          input[type="number"] { width: 80px; }
-          .bp-row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
-          .bp-row label { margin-top: 0; flex: 1; }
-          .bp-toggle { display: flex; align-items: center; gap: 6px; margin-top: 8px; cursor: pointer; }
-          .bp-toggle input[type="checkbox"] { margin: 0; }
-          .bp-hint { font-size: 11px; color: #94a3b8; margin-top: 2px; line-height: 1.3; }
+          .bp-title { font-weight: 700; font-size: 13px; margin-bottom: 8px; }
+          .bp-hint { font-size: 11px; color: #64748b; line-height: 1.5; margin-top: 6px; }
+          .bp-section { margin-top: 14px; padding-top: 10px; border-top: 1px solid #e2e8f0; }
+          .bp-section-title { font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; margin-bottom: 4px; }
         </style>
         <div class="bp-title">Decomposition Tree</div>
-
-        <div class="bp-section">
-          <div class="bp-section-title">Data</div>
-          <label>Root label
-            <input type="text" data-key="rootLabel" value="${this._prop("rootLabel", "Total")}">
-          </label>
-          <label>Others label
-            <input type="text" data-key="othersLabel" value="${this._prop("othersLabel", "Others")}">
-          </label>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="enableOthers" ${this._prop("enableOthers", true) ? "checked" : ""}>
-            <span>Enable "Others" rollup</span>
-          </div>
-          <label>Top N
-            <input type="number" data-key="topN" min="1" max="100" value="${this._prop("topN", 10)}">
-          </label>
-          <div class="bp-hint">Members beyond Top N are rolled into "Others".</div>
+        <div class="bp-hint">
+          Drag <strong>dimensions</strong> into the Dimensions feed to define
+          the drill-down hierarchy. The tree will let users pick which
+          dimension to drill by at each level.
         </div>
-
-        <div class="bp-section">
-          <div class="bp-section-title">Display</div>
-          <label>Initial expand level
-            <input type="number" data-key="initialExpandLevel" min="0" max="10" value="${this._prop("initialExpandLevel", 1)}">
-          </label>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="showValues" ${this._prop("showValues", true) ? "checked" : ""}>
-            <span>Show values</span>
-          </div>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="showPercentOfParent" ${this._prop("showPercentOfParent", true) ? "checked" : ""}>
-            <span>Show % of parent</span>
-          </div>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="showDimensionTag" ${this._prop("showDimensionTag", true) ? "checked" : ""}>
-            <span>Show dimension tag</span>
-          </div>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="sortDescending" ${this._prop("sortDescending", true) ? "checked" : ""}>
-            <span>Sort descending (largest first)</span>
-          </div>
+        <div class="bp-hint">
+          Drag <strong>1 measure</strong> for standard mode, or
+          <strong>2 measures</strong> to enable comparison mode
+          (the second measure becomes the plan/target).
         </div>
-
         <div class="bp-section">
-          <div class="bp-section-title">Layout</div>
-          <label>Density
-            <select data-key="densityMode">
-              <option value="compact" ${this._prop("densityMode", "comfortable") === "compact" ? "selected" : ""}>Compact</option>
-              <option value="comfortable" ${this._prop("densityMode", "comfortable") === "comfortable" ? "selected" : ""}>Comfortable</option>
-              <option value="spacious" ${this._prop("densityMode", "comfortable") === "spacious" ? "selected" : ""}>Spacious</option>
-            </select>
-          </label>
-          <label>Direction
-            <select data-key="direction">
-              <option value="ltr" ${this._prop("direction", "ltr") === "ltr" ? "selected" : ""}>Left to Right</option>
-              <option value="rtl" ${this._prop("direction", "ltr") === "rtl" ? "selected" : ""}>Right to Left</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="bp-section">
-          <div class="bp-section-title">Interaction</div>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="enableNodeDrag" ${this._prop("enableNodeDrag", true) ? "checked" : ""}>
-            <span>Enable node drag</span>
-          </div>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="enableZoomPan" ${this._prop("enableZoomPan", true) ? "checked" : ""}>
-            <span>Enable zoom &amp; pan</span>
-          </div>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="showExportPng" ${this._prop("showExportPng", true) ? "checked" : ""}>
-            <span>Show PNG export</span>
-          </div>
-          <div class="bp-toggle">
-            <input type="checkbox" data-key="showExportCsv" ${this._prop("showExportCsv", true) ? "checked" : ""}>
-            <span>Show CSV export</span>
+          <div class="bp-section-title">Tips</div>
+          <div class="bp-hint">
+            • Use the <strong>Styling</strong> tab to configure Top-N, labels,
+              theme, density, colors, and conditional formatting.<br>
+            • Use scripting methods like <code>expandPath()</code>,
+              <code>getState()</code>/<code>setState()</code> for
+              bookmark persistence.
           </div>
         </div>
       `;
-      this.shadowRoot.querySelectorAll("input, select").forEach(el => {
-        el.addEventListener("change", () => this._emitProperties());
-      });
-    }
-    _prop(key, fallback) {
-      // Try to read from the host widget's current property value
-      const host = this.closest("[data-sac-widget]") || this.getRootNode()?.host;
-      if (host && host[key] !== undefined) return host[key];
-      return fallback;
-    }
-    _emitProperties() {
-      const props = {};
-      this.shadowRoot.querySelectorAll("input, select").forEach(el => {
-        const key = el.dataset.key;
-        if (!key) return;
-        if (el.type === "checkbox") {
-          props[key] = el.checked;
-        } else if (el.type === "number") {
-          props[key] = Number(el.value);
-        } else {
-          props[key] = el.value;
-        }
-      });
-      this.dispatchEvent(new CustomEvent("propertiesChanged", { detail: { properties: props } }));
     }
   }
 
