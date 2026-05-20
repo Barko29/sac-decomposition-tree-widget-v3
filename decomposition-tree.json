@@ -19,13 +19,6 @@
       "url": "https://barko29.github.io/sac-decomposition-tree-widget-v3/decomposition-tree.js",
       "integrity": "",
       "ignoreIntegrity": true
-    },
-    {
-      "kind": "builder",
-      "tag": "com-company-decomposition-tree-v3-builder",
-      "url": "https://barko29.github.io/sac-decomposition-tree-widget-v3/decomposition-tree.js",
-      "integrity": "",
-      "ignoreIntegrity": true
     }
   ],
   "dataBindings": {
