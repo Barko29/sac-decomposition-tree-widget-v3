@@ -1137,9 +1137,18 @@
       this._parseCfRules();
       // Create the style element once — never regenerated per render.
       // The render method only updates the SVG/overlay content.
-      this._styleEl = document.createElement("style");
-      this.shadowRoot.appendChild(this._styleEl);
+      if (!this._styleEl) {
+        this._styleEl = document.createElement("style");
+      }
+      // Re-append: after a tab switch the shadow DOM may have been cleared
+      if (!this._styleEl.parentNode) {
+        this.shadowRoot.appendChild(this._styleEl);
+      }
       this._updateStyles();
+      // Reset the binding hash so tryRefreshFromBinding re-ingests data.
+      // This is critical after a tab switch: disconnectedCallback/SAC may
+      // have cleared the DOM, but the binding is still valid.
+      this._lastBindingHash = null;
       this.tryRefreshFromBinding();
       this.render();
     }
@@ -1180,17 +1189,14 @@
 
     // Safety net: if the element is removed from DOM without SAC calling
     // onCustomWidgetDestroy (e.g. during page navigation), clean up here.
+    // Called when the element is removed from the DOM — e.g. tab switch.
+    // Only clean up timers and listeners. Do NOT destroy data state:
+    // SAC may re-attach the element (tab switch back), and connectedCallback
+    // needs the dataset/tree intact to re-render without a full rebuild.
     disconnectedCallback() {
       this._clearHoverTimers();
       if (this._zoomRenderTimer) { clearTimeout(this._zoomRenderTimer); this._zoomRenderTimer = null; }
       this._teardownGlobalListeners();
-      // Null out large references to help GC
-      this._dataset = null;
-      this._lazyTree = null;
-      this._cachedPositioned = null;
-      this._rowIndex = null;
-      this._nodeIndex.clear();
-      this._expandedByLevel.clear();
     }
 
     onCustomWidgetBeforeUpdate(changedProperties) {
