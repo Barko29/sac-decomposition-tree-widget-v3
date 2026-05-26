@@ -290,6 +290,25 @@
     { value: "hide",           label: "Hide node",        type: "boolean" }
   ];
 
+  // Validation sets for conditional formatting rules (security: S2)
+  const _VALID_CF_FIELDS   = new Set(CF_FIELDS.map(f => f.value));
+  const _VALID_CF_OPS      = new Set(CF_OPERATORS.map(o => o.value));
+  const _VALID_CF_ACTIONS  = new Set(CF_ACTIONS.map(a => a.value));
+  const _CF_COLOR_ACTIONS  = new Set(CF_ACTIONS.filter(a => a.type === "color").map(a => a.value));
+
+  function _isValidCfRule(rule) {
+    if (!rule || typeof rule !== "object") return false;
+    if (!_VALID_CF_FIELDS.has(rule.field)) return false;
+    if (!_VALID_CF_OPS.has(rule.operator)) return false;
+    if (!_VALID_CF_ACTIONS.has(rule.action)) return false;
+    if (rule.value !== undefined && !Number.isFinite(Number(rule.value))) return false;
+    // Color-type actions must have a valid CSS color actionValue
+    if (_CF_COLOR_ACTIONS.has(rule.action) && rule.actionValue) {
+      if (!sanitizeCssColor(rule.actionValue)) return false;
+    }
+    return true;
+  }
+
   function evaluateCondition(operator, fieldValue, threshold) {
     switch (operator) {
       case "<":  return fieldValue <  threshold;
@@ -397,6 +416,15 @@
       .replaceAll(">", "&gt;")
       .replaceAll('"', "&quot;")
       .replaceAll("'", "&apos;");
+  }
+
+  // Security: validate that a value is a safe CSS color before injecting
+  // into style attributes. Allows #RGB, #RRGGBB, #RRGGBBAA, and rgb().
+  const _CSS_COLOR_RE = /^#[0-9a-fA-F]{3,8}$|^rgb\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}\s*\)$/;
+  function sanitizeCssColor(val) {
+    if (typeof val !== "string") return null;
+    const trimmed = val.trim();
+    return _CSS_COLOR_RE.test(trimmed) ? trimmed : null;
   }
 
   // Cached Intl.NumberFormat instances — construction is ~10x more expensive
@@ -1036,6 +1064,19 @@
     return Object.keys(changedProperties).some(k => STRUCTURAL_PROPS.has(k));
   }
 
+  // Properties that affect the CSS stylesheet content. Changes to only
+  // non-style properties (topN, maxVisibleNodes, etc.) skip the style
+  // regeneration step for better performance (P4 fix).
+  const STYLE_AFFECTING_PROPS = new Set([
+    "backgroundColor", "nodeBackgroundColor", "nodeBorderColor",
+    "nodeShadowColor", "focusBorderColor", "labelColor",
+    "valueLabelColor", "othersLabelColor", "barColor",
+    "negativeBarColor", "othersBarColor", "barBackgroundColor",
+    "connectorColor", "toggleBackgroundColor", "toggleBorderColor",
+    "toggleTextColor", "favorableColor", "unfavorableColor",
+    "planBarColor"
+  ]);
+
   /* ---------- Main custom element ---------- */
 
   class DecompositionTreeWidget extends HTMLElement {
@@ -1121,11 +1162,28 @@
       try {
         const raw = this._settings.conditionalFormattingRules;
         const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-        this._cfRules = Array.isArray(parsed) ? parsed : [];
+        this._cfRules = Array.isArray(parsed) ? parsed.filter(_isValidCfRule) : [];
       } catch (e) {
         console.warn("DecompositionTree: invalid conditionalFormattingRules JSON — rules disabled", e);
         this._cfRules = [];
       }
+    }
+
+    // SAC may pass property values as strings. Ensure numeric settings
+    // are always stored as numbers to prevent "250" + 90 = "25090" bugs.
+    _normalizeNumericSettings() {
+      const s = this._settings;
+      s.nodeWidth         = toNumber(s.nodeWidth)         || 250;
+      s.nodeHeight        = toNumber(s.nodeHeight)        || 58;
+      s.levelGap          = toNumber(s.levelGap)          || 90;
+      s.siblingGap        = toNumber(s.siblingGap)        || 16;
+      s.paddingLeft       = toNumber(s.paddingLeft)       || 14;
+      s.paddingRight      = toNumber(s.paddingRight)      || 14;
+      s.labelTagGap       = toNumber(s.labelTagGap)       || 8;
+      s.topN              = toNumber(s.topN)              || 10;
+      s.maxVisibleNodes   = toNumber(s.maxVisibleNodes)   || 500;
+      s.initialExpandLevel = toNumber(s.initialExpandLevel);
+      s.percentDecimals   = toNumber(s.percentDecimals);
     }
 
     // SAC lifecycle: called once before the first render with initial properties.
@@ -1134,7 +1192,9 @@
     }
 
     connectedCallback() {
-      this._parseCfRules();
+      // Note: _parseCfRules() is NOT called here — it runs once in
+      // onCustomWidgetInit and on every property update. Calling it
+      // again on re-attach (tab switch) is unnecessary (SAC-1 fix).
       // Create the style element once — never regenerated per render.
       // The render method only updates the SVG/overlay content.
       if (!this._styleEl) {
@@ -1164,6 +1224,8 @@
     // This avoids re-parsing ~325 lines of CSS on every render cycle.
     _setContentHtml(html) {
       if (!this.shadowRoot) return;
+      // Invalidate cached node element references (P3 fix).
+      this._cachedNodeEls = null;
       // Remove everything except the style element
       const children = Array.from(this.shadowRoot.childNodes);
       for (const child of children) {
@@ -1221,6 +1283,10 @@
 
       this._settings = { ...this._settings, ...changedProperties };
 
+      // SAC-2 fix: SAC may pass numeric properties as strings.
+      // Normalize to numbers to prevent string concatenation bugs.
+      this._normalizeNumericSettings();
+
       // Parse conditional formatting rules from JSON string
       if (changedProperties.conditionalFormattingRules !== undefined) {
         this._parseCfRules();
@@ -1244,8 +1310,12 @@
         this.rebuildAfterStructuralChange();
       }
 
-      // Refresh style element when any cosmetic property changes
-      this._updateStyles();
+      // Refresh style element only when cosmetic properties change (P4 fix).
+      // Theme and density preset changes always affect styles.
+      if (changedProperties.themePreset || changedProperties.densityMode ||
+          Object.keys(changedProperties).some(k => STYLE_AFFECTING_PROPS.has(k))) {
+        this._updateStyles();
+      }
     }
 
     onCustomWidgetAfterUpdate() {
@@ -1278,6 +1348,42 @@
 
     /* ---------- Data ingest ---------- */
 
+    // Lightweight but value-sensitive fingerprint of the SAC binding.
+    // Samples measure values from up to 8 evenly-spaced rows so that
+    // datasets with the same row count but different values produce
+    // different hashes. Metadata feeds are included to detect feed
+    // re-configuration. Avoids expensive full-data JSON.stringify.
+    _fingerprintBinding(binding) {
+      if (!binding || !binding.data) return "empty";
+      const rows = binding.data;
+      const n = rows.length;
+      const feedsKey = JSON.stringify(binding.metadata && binding.metadata.feeds ? binding.metadata.feeds : "");
+      if (!n) return "0|" + feedsKey;
+
+      const measureAliases =
+        binding.metadata && binding.metadata.feeds &&
+        binding.metadata.feeds.measures && Array.isArray(binding.metadata.feeds.measures.values)
+          ? binding.metadata.feeds.measures.values
+          : [];
+      const firstMeasure = measureAliases[0];
+      if (!firstMeasure) return n + "|" + feedsKey;
+
+      // Sample ~8 evenly-spaced rows for value fingerprint
+      const sampleIndices = [0];
+      for (let i = 1; i <= 6; i++) {
+        const idx = Math.floor((i * n) / 7);
+        if (idx > 0 && idx < n) sampleIndices.push(idx);
+      }
+      if (n > 1) sampleIndices.push(n - 1);
+
+      const sample = sampleIndices
+        .filter((v, i, a) => a.indexOf(v) === i)   // deduplicate
+        .map(i => readMeasureValue(rows[i][firstMeasure]))
+        .join(",");
+
+      return n + "|" + sample + "|" + feedsKey;
+    }
+
     tryRefreshFromBinding() {
       const binding = this.mainBinding;
       if (!binding) return;
@@ -1285,8 +1391,9 @@
       // Quick fingerprint to skip re-extraction when data hasn't changed.
       // This prevents unnecessary tree rebuilds on cosmetic property changes
       // (colors, sizes) that also trigger onCustomWidgetAfterUpdate.
-      const bindingHash = (binding.data ? binding.data.length : 0) +
-        "|" + JSON.stringify(binding.metadata || "");
+      // Bug fix: include sampled measure values, not just row count, so
+      // datasets with the same row count but different values are detected.
+      const bindingHash = this._fingerprintBinding(binding);
       if (bindingHash === this._lastBindingHash) return;
       this._lastBindingHash = bindingHash;
 
@@ -1521,21 +1628,11 @@
         // A level is "active" if some node at level (lvl - 1) is expanded,
         // meaning its children at `lvl` are visible. Also always keep
         // ancestor levels (< excludeLevel) since they define the path.
-        if (lvl < excludeLevel || this._isLevelInUseCached(lvl)) {
+        if (lvl < excludeLevel || this._isLevelInUse(lvl)) {
           active.add(alias);
         }
       }
       return active;
-    }
-
-    // Cached wrapper: avoids repeated tree walks within a single render cycle.
-    _isLevelInUseCached(level) {
-      return this._isLevelInUse(level);
-    }
-
-    // Invalidate the cache at the start of each render/toggle cycle.
-    _clearLevelInUseCache() {
-      // No-op: O(1) counter replaces the per-render cache.
     }
 
     // O(1) check: are any nodes at (level - 1) currently expanded?
@@ -1757,6 +1854,10 @@
 
       const ok = matchedDepth === safeLabels.length;
 
+      // Rebuild the _expandedByLevel counter to stay in sync after
+      // the bulk _expanded.add calls above (Bug 5 fix).
+      this._rebuildExpandedByLevel();
+
       // Optionally select the deepest matched node
       if (opts.select && lastMatchedNode && lastMatchedNode.id !== "__root__") {
         this._selectedNodeId = lastMatchedNode.id;
@@ -1953,10 +2054,12 @@
                 a.style.display = "none";
                 document.body.appendChild(a);
                 a.click();
+                // Use try/finally pattern for cleanup robustness (S3 fix).
+                // Longer timeout for slower browsers/SAC webviews.
                 setTimeout(() => {
-                  document.body.removeChild(a);
+                  try { document.body.removeChild(a); } catch (_) { /* already removed */ }
                   URL.revokeObjectURL(url);
-                }, 100);
+                }, 200);
               } catch (downloadErr) {
                 console.error("Decomposition Tree: PNG download failed", downloadErr);
               }
@@ -2192,10 +2295,14 @@
       const a = document.createElement("a");
       a.href = url;
       a.download = opts.filename;
+      a.style.display = "none";
       document.body.appendChild(a);
       a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Deferred cleanup for robustness (S3 fix).
+      setTimeout(() => {
+        try { document.body.removeChild(a); } catch (_) { /* already removed */ }
+        URL.revokeObjectURL(url);
+      }, 200);
       } catch (e) {
         console.error("Decomposition Tree: exportCsv failed", e);
       }
@@ -2205,25 +2312,26 @@
       const budget = Math.max(10, toNumber(this._settings.maxVisibleNodes) || 500);
       let count = 0;
       if (this._lazyTree) {
-        const visit = node => {
+        const visit = (node, isRoot) => {
           if (count >= budget) return;
           this._expanded.add(node.id);
-          count++;
+          // Don't count root against the budget — it's always visible (Bug 9 fix).
+          if (!isRoot) count++;
           this._materializeChildren(node);
-          if (node.children) node.children.forEach(visit);
+          if (node.children) node.children.forEach(c => visit(c, false));
         };
-        visit(this._lazyTree);
+        visit(this._lazyTree, true);
         if (count >= budget) {
           console.warn(`DecompositionTree: expandAll stopped after ${budget} nodes (maxVisibleNodes limit). Use setExpandedLevel or expand specific paths instead.`);
         }
       } else {
-        const visit = node => {
+        const visit = (node, isRoot) => {
           if (count >= budget) return;
           this._expanded.add(node.id);
-          count++;
-          if (node.children) node.children.forEach(visit);
+          if (!isRoot) count++;
+          if (node.children) node.children.forEach(c => visit(c, false));
         };
-        this._tree.forEach(visit);
+        this._tree.forEach(root => visit(root, true));
       }
       this._rebuildExpandedByLevel();
       this.render();
@@ -2237,12 +2345,22 @@
 
     setExpandedLevel(level = 1, doRender = true) {
       this._expanded.clear();
+      const target = Math.max(0, toNumber(level));
       if (this._lazyTree) {
-        this._settings.initialExpandLevel = level;
-        this._applyInitialExpansion();
+        // Do NOT mutate _settings.initialExpandLevel — this is a runtime
+        // scripting call, not a design-time configuration change.
+        const visit = (node, depth) => {
+          if (depth >= target) return;
+          this._expanded.add(node.id);
+          this._materializeChildren(node);
+          if (node.children) {
+            node.children.forEach(c => visit(c, depth + 1));
+          }
+        };
+        visit(this._lazyTree, 0);
       } else {
         const visit = (node, currentLevel) => {
-          if (currentLevel < level) {
+          if (currentLevel < target) {
             this._expanded.add(node.id);
             if (node.children) {
               node.children.forEach(child => visit(child, currentLevel + 1));
@@ -2462,11 +2580,28 @@
     _invalidateChildrenAtLevel(node, level) {
       if (!node) return;
       if (node.level + 1 === level) {
+        // Remove invalidated children from _nodeIndex to prevent unbounded
+        // growth after repeated dimension changes (Bug 6 fix).
+        if (node.children) {
+          this._removeSubtreeFromIndex(node.children);
+        }
         node.children = null;
         return;
       }
       if (node.children) {
         node.children.forEach(c => this._invalidateChildrenAtLevel(c, level));
+      }
+    }
+
+    // Recursively remove nodes from _nodeIndex. Used when invalidating
+    // children so stale references don't accumulate indefinitely.
+    _removeSubtreeFromIndex(children) {
+      if (!children) return;
+      for (const child of children) {
+        this._nodeIndex.delete(child.id);
+        if (child.children) {
+          this._removeSubtreeFromIndex(child.children);
+        }
       }
     }
 
@@ -2596,7 +2731,6 @@
 
     _renderInternal() {
       if (!this.shadowRoot) return;
-      this._clearLevelInUseCache();
 
       const s = this._settings;
       const rootTree = this._lazyTree ? [this._lazyTree] : this._tree;
@@ -2619,7 +2753,7 @@
       }
 
       const isRtl = s.direction === "rtl";
-      const maxLevel = Math.max(0, ...visible.map(n => n.level));
+      const maxLevel = visible.reduce((max, n) => Math.max(max, n.level), 0);
       // Total width needed for the tree (used for RTL mirror calculation)
       const treeWidth = Math.max(700, 40 + (maxLevel + 1) * (s.nodeWidth + s.levelGap));
 
@@ -2639,8 +2773,8 @@
         };
       });
 
-      const maxX = Math.max(700, ...positioned.map(n => n.x + n.width + 20));
-      const maxY = Math.max(240, ...positioned.map(n => n.y + n.height + 20));
+      const maxX = positioned.reduce((max, n) => Math.max(max, n.x + n.width + 20), 700);
+      const maxY = positioned.reduce((max, n) => Math.max(max, n.y + n.height + 20), 240);
       const width = Math.max(treeWidth, maxX);
       const height = Math.max(
         240,
@@ -2734,7 +2868,7 @@
           return `<path class="connector" d="M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}" />`;
         })
         .join("");
-      const renderMaxY = Math.max(240, ...renderNodes.map(n => n.y + n.height + 20));
+      const renderMaxY = renderNodes.reduce((max, n) => Math.max(max, n.y + n.height + 20), 240);
       const renderHeight = Math.max(240, 40 + renderNodes.length * (s.nodeHeight + s.siblingGap), renderMaxY);
 
       // Cache renderNodes (post-CF-filter) for live drag and hover.
@@ -2794,12 +2928,13 @@
 
           // Conditional formatting: read from pre-computed cache.
           // (Hide action already handled in pre-filter above.)
-          const cf = cfCache.get(node.id) || (this._cfRules.length ? evaluateConditionalFormatting(node, this._cfRules) : null);
-          const cfBarColor       = cf && cf.barColor       ? cf.barColor       : null;
-          const cfLabelBold      = cf && cf.labelBold      ? true              : false;
-          const cfLabelColor     = cf && cf.labelColor     ? cf.labelColor     : null;
-          const cfCardBorder     = cf && cf.cardBorder     ? cf.cardBorder     : null;
-          const cfCardBackground = cf && cf.cardBackground ? cf.cardBackground : null;
+          // Use cache-only lookup — fall back to null, never re-evaluate.
+          const cf = cfCache.has(node.id) ? cfCache.get(node.id) : null;
+          const cfBarColor       = cf && cf.barColor       ? sanitizeCssColor(cf.barColor)       : null;
+          const cfLabelBold      = cf && cf.labelBold      ? true                                : false;
+          const cfLabelColor     = cf && cf.labelColor     ? sanitizeCssColor(cf.labelColor)     : null;
+          const cfCardBorder     = cf && cf.cardBorder     ? sanitizeCssColor(cf.cardBorder)     : null;
+          const cfCardBackground = cf && cf.cardBackground ? sanitizeCssColor(cf.cardBackground) : null;
           if (cfBarColor) fill = cfBarColor;
 
           // "Change dimension" affordance: small icon, only in lazy mode,
@@ -2995,6 +3130,10 @@
 
       this._wireViewportEvents();
       this._wireGlobalListeners();
+
+      // Cache the node element list for keyboard navigation (P3 fix).
+      // Invalidated on next render by _setContentHtml clearing the DOM.
+      this._cachedNodeEls = Array.from(this.shadowRoot.querySelectorAll(".dt-node"));
     }
 
     _renderSelectionBannerHtml() {
@@ -3308,7 +3447,9 @@
           }
 
           // WAI-ARIA Treeview keyboard pattern
-          const allNodes = Array.from(this.shadowRoot.querySelectorAll(".dt-node"));
+          // Use cached node list for performance (P3 fix). Falls back to
+          // live query if cache is stale (should not happen in normal flow).
+          const allNodes = this._cachedNodeEls || Array.from(this.shadowRoot.querySelectorAll(".dt-node"));
           const currentIdx = allNodes.indexOf(el);
 
           if (event.key === "ArrowDown") {
@@ -3515,9 +3656,12 @@
         if (n.parentVisibleIndex === null) continue;
         const p = byIndex.get(n.parentVisibleIndex);
         if (!p) continue;
-        const x1 = p.x + p.width;
+        // RTL: parent left edge → child right edge
+        // LTR: parent right edge → child left edge
+        const isRtl = this._settings.direction === "rtl";
+        const x1 = isRtl ? p.x : (p.x + p.width);
         const y1 = p.y + p.height / 2;
-        const x2 = n.x;
+        const x2 = isRtl ? (n.x + n.width) : n.x;
         const y2 = n.y + n.height / 2;
         const mid = (x1 + x2) / 2;
         const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
